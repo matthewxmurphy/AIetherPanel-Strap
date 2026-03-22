@@ -52,7 +52,7 @@ CONTROL_DB_CA_PATH=""
 
 usage() {
   cat <<'EOF'
-AletherPanel installer
+AIetherPanel installer
 
 Usage:
   aetherpanel-install.sh [options]
@@ -91,7 +91,7 @@ Options:
 
 Notes:
   - The per-server panel is bound to the Tailscale IPv4 by default.
-  - Apache stays available for websites. AletherPanel lighttpd runs as its own dedicated service.
+  - Apache stays available for websites. AIetherPanel lighttpd runs as its own dedicated service.
   - If MariaDB/Postgres is installed here, that is for websites, not panel state.
   - Fail2ban is local. CrowdSec is handled remotely and is not installed by this script.
   - This single script is the normal node bootstrap path.
@@ -129,7 +129,7 @@ require_root() {
 detect_os() {
   . /etc/os-release
   if [ "${ID:-}" != "ubuntu" ]; then
-    fail "Ubuntu is required for the first AletherPanel host baseline."
+    fail "Ubuntu is required for the first AIetherPanel host baseline."
   fi
 }
 
@@ -507,7 +507,7 @@ EOF
 write_branding_seed() {
   cat <<EOF >/tmp/aetherpanel-branding.json
 {
-  "project_name": "AletherPanel",
+  "project_name": "AIetherPanel",
   "business_end": "AI Control Host",
   "owner": "Matthew Murphy",
   "organization_name": "Net30 Hosting",
@@ -588,7 +588,7 @@ write_control_db_env_seed() {
   if [ "$CONTROL_DB_ENABLED" != "1" ]; then
     cat <<'EOF' >/tmp/aetherpanel-controller-db.env
 # External control database is still pending on this server.
-# Save and test the real managed database details from the AletherPanel UI when they exist.
+# Save and test the real managed database details from the AIetherPanel UI when they exist.
 EOF
     run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-controller-db.env $PANEL_VAR/state/controller-db.env"
     return 0
@@ -614,7 +614,7 @@ write_onboarding_seed() {
   cat <<'EOF' >/tmp/aetherpanel-onboarding.json
 {
   "title": "Your account setup",
-  "subtitle": "Finish the first fleet steps before handing real websites and customers to AletherPanel.",
+  "subtitle": "Finish the first fleet steps before handing real websites and customers to AIetherPanel.",
   "ssh_known_ip_lock": false,
   "control_database_ready": false,
   "backup_target_ready": false,
@@ -669,7 +669,7 @@ write_onboarding_seed() {
     {
       "id": "import_existing_sites",
       "title": "Import existing sites",
-      "summary": "Bring current website inventory and external panel state into AletherPanel."
+      "summary": "Bring current website inventory and external panel state into AIetherPanel."
     }
   ]
 }
@@ -679,7 +679,7 @@ EOF
 
 write_panel_model_seed() {
   cat <<EOF >/tmp/aetherpanel-users.toon
-title: "AletherPanel Users"
+title: "AIetherPanel Users"
 roles:
   - id: "platform_admin"
     label: "Platform Admin"
@@ -1018,7 +1018,7 @@ print_summary() {
 
   cat <<EOF
 
-AletherPanel bootstrap complete.
+AIetherPanel bootstrap complete.
 
 Node:          ${NODE_NAME}
 Profile:       ${PROFILE}
@@ -1037,7 +1037,7 @@ Role seed:      ${PANEL_VAR}/state/users.toon
 Node config:    ${PANEL_ETC}/node.env
 
 Remember:
-- lighttpd is the dedicated per-server AletherPanel service on this host
+- lighttpd is the dedicated per-server AIetherPanel service on this host
 - Apache only installs when the profile carries the web role
 - Fail2ban is local. CrowdSec stays remote-managed.
 - host MariaDB/Postgres is for websites, not panel state

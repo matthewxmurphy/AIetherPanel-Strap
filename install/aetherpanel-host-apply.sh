@@ -16,7 +16,7 @@ SSH_SOURCE_CACHE=""
 
 usage() {
   cat <<'EOF'
-AetherPanel host baseline apply
+AIetherPanel host baseline apply
 
 Usage:
   aetherpanel-host-apply.sh [options]
@@ -102,7 +102,7 @@ require_root() {
 detect_os() {
   . /etc/os-release
   if [ "${ID:-}" != "ubuntu" ]; then
-    fail "Ubuntu is required for the current AetherPanel host baseline."
+    fail "Ubuntu is required for the current AIetherPanel host baseline."
   fi
 }
 
@@ -361,7 +361,7 @@ cleanup() {
 print_summary() {
   cat <<EOF
 
-AetherPanel host baseline applied.
+AIetherPanel host baseline applied.
 
 Node:          ${NODE_NAME}
 Profile:       ${PROFILE}
