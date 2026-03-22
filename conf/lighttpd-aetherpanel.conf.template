@@ -33,6 +33,11 @@ auth.require = (
   )
 )
 
+setenv.add-environment = (
+  "AETHERPANEL_SCRIPT_PATH" => "/",
+  "AETHERPANEL_ASSET_PREFIX" => ""
+)
+
 setenv.add-response-header = (
   "X-AetherPanel-Node" => "__NODE_NAME__",
   "X-AetherPanel-Gate" => "tailscale-bind"

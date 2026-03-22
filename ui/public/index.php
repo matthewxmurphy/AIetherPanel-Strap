@@ -4,10 +4,18 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/lib/bootstrap.php';
 
 $scriptName = (string)($_SERVER['AETHERPANEL_SCRIPT_PATH'] ?? ($_SERVER['SCRIPT_NAME'] ?? '/aetherpanel/ui/public/index.php'));
-$scriptPath = $scriptName !== '' ? $scriptName : '/aetherpanel/ui/public/index.php';
+$requestPath = parse_url((string)($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+if (!is_string($requestPath) || $requestPath === '') {
+    $requestPath = '';
+}
+$scriptPath = $requestPath !== '' ? $requestPath : ($scriptName !== '' ? $scriptName : '/');
 $assetBase = trim((string)($_SERVER['AETHERPANEL_ASSET_PREFIX'] ?? ''));
 if ($assetBase === '') {
-    $assetBase = rtrim(str_replace('\\', '/', dirname($scriptPath)), '/');
+    if ($scriptPath === '/' || $scriptPath === '') {
+        $assetBase = '';
+    } else {
+        $assetBase = rtrim(str_replace('\\', '/', dirname($scriptPath)), '/');
+    }
 }
 $assetPrefix = $assetBase !== '' ? $assetBase : '';
 
