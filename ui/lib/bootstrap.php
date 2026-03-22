@@ -138,7 +138,12 @@ function aetherpanel_write_json(string $path, array $payload): bool
         return false;
     }
 
-    return file_put_contents($path, $encoded . PHP_EOL) !== false;
+    $written = file_put_contents($path, $encoded . PHP_EOL) !== false;
+    if ($written) {
+        @chmod($path, 0660);
+    }
+
+    return $written;
 }
 
 function aetherpanel_default_branding(): array
@@ -297,7 +302,9 @@ function aetherpanel_node_context(): array
     return [
         'node_name' => $env['NODE_NAME'] ?? php_uname('n'),
         'roles' => array_values(array_filter(array_map('trim', explode(',', (string)($env['ROLES'] ?? 'controller,web,database'))))),
-        'controller_url' => $env['CONTROLLER_URL'] ?? 'https://my.net30hosting.com',
+        'controller_url' => $env['CONTROLLER_URL'] ?? '',
+        'controller_api_url' => $env['CONTROLLER_API_URL'] ?? '',
+        'join_key_present' => trim((string)($env['JOIN_KEY'] ?? '')) !== '',
         'public_hostname' => $env['PUBLIC_HOSTNAME'] ?? '',
         'tailscale_ip' => $env['TAILSCALE_IP'] ?? '',
         'panel_port' => $env['PANEL_PORT'] ?? '8844',
@@ -373,6 +380,398 @@ function aetherpanel_permission_list(array $roles): array
     return $labels;
 }
 
+function aetherpanel_mask_secret(string $value): string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return 'Not set';
+    }
+    if (strlen($value) <= 8) {
+        return str_repeat('*', strlen($value));
+    }
+    return substr($value, 0, 4) . str_repeat('*', max(4, strlen($value) - 8)) . substr($value, -4);
+}
+
+function aetherpanel_default_ai_config(): array
+{
+    return [
+        'ollama_cloud' => [
+            'enabled' => false,
+            'base_url' => 'https://ollama.com/v1',
+            'api_key' => '',
+            'model' => 'nemotron-3-super:cloud',
+        ],
+    ];
+}
+
+function aetherpanel_ai_config_path(): string
+{
+    return aetherpanel_mutable_json_path('ai.json');
+}
+
+function aetherpanel_load_ai_config(): array
+{
+    $config = aetherpanel_read_json(aetherpanel_ai_config_path(), []);
+    return array_replace_recursive(aetherpanel_default_ai_config(), $config);
+}
+
+function aetherpanel_save_ai_config(array $config): bool
+{
+    return aetherpanel_write_json(aetherpanel_ai_config_path(), $config);
+}
+
+function aetherpanel_save_ollama_cloud_settings(bool $enabled, string $apiKey, string $model, string $baseUrl = ''): array
+{
+    $apiKey = trim($apiKey);
+    $model = trim($model);
+    $baseUrl = trim($baseUrl);
+
+    if ($model === '') {
+        return ['ok' => false, 'message' => 'Model is required for the Ollama Cloud lane.'];
+    }
+    if ($enabled && $apiKey === '') {
+        return ['ok' => false, 'message' => 'Paste the Ollama Cloud key before enabling this lane.'];
+    }
+    if ($baseUrl === '') {
+        $baseUrl = 'https://ollama.com/v1';
+    }
+
+    $config = aetherpanel_load_ai_config();
+    $config['ollama_cloud'] = [
+        'enabled' => $enabled,
+        'base_url' => $baseUrl,
+        'api_key' => $apiKey,
+        'model' => $model,
+    ];
+
+    if (!aetherpanel_save_ai_config($config)) {
+        return ['ok' => false, 'message' => 'Could not save the Ollama Cloud settings on this node yet.'];
+    }
+
+    return [
+        'ok' => true,
+        'message' => $enabled
+            ? 'Ollama Cloud is enabled for this node.'
+            : 'Ollama Cloud settings saved, but the lane is disabled.',
+    ];
+}
+
+function aetherpanel_default_control_db_config(): array
+{
+    return [
+        'enabled' => false,
+        'driver' => 'mysql',
+        'host' => '',
+        'port' => '',
+        'database' => '',
+        'username' => '',
+        'password' => '',
+        'ssl_mode' => 'preferred',
+        'ca_path' => '',
+    ];
+}
+
+function aetherpanel_control_db_config_path(): string
+{
+    return aetherpanel_mutable_json_path('control-db.json');
+}
+
+function aetherpanel_control_db_status_path(): string
+{
+    return aetherpanel_mutable_json_path('control-db-status.json');
+}
+
+function aetherpanel_control_db_env_path(): string
+{
+    return aetherpanel_state_file('controller-db.env');
+}
+
+function aetherpanel_load_control_db_config(): array
+{
+    $config = aetherpanel_read_json(aetherpanel_control_db_config_path(), []);
+    return array_replace(aetherpanel_default_control_db_config(), $config);
+}
+
+function aetherpanel_save_control_db_config(array $config): bool
+{
+    return aetherpanel_write_json(aetherpanel_control_db_config_path(), $config);
+}
+
+function aetherpanel_load_control_db_status(): array
+{
+    return aetherpanel_read_json(aetherpanel_control_db_status_path(), [
+        'checked_at' => null,
+        'ok' => false,
+        'message' => 'Control database lane is still pending on this server.',
+        'latency_ms' => null,
+        'driver' => null,
+        'server_version' => null,
+        'details' => [],
+    ]);
+}
+
+function aetherpanel_save_control_db_status(array $status): bool
+{
+    return aetherpanel_write_json(aetherpanel_control_db_status_path(), $status);
+}
+
+function aetherpanel_default_db_port(string $driver): string
+{
+    return $driver === 'pgsql' ? '5432' : '3306';
+}
+
+function aetherpanel_control_db_runtime_driver(string $driver): string
+{
+    return $driver === 'mariadb' ? 'mysql' : $driver;
+}
+
+function aetherpanel_write_control_db_env_file(array $config): bool
+{
+    $path = aetherpanel_control_db_env_path();
+    $dir = dirname($path);
+    if (!is_dir($dir) || (!is_writable($dir) && !is_writable($path))) {
+        return false;
+    }
+
+    $written = file_put_contents($path, aetherpanel_control_db_env_snippet($config) . PHP_EOL) !== false;
+    if ($written) {
+        @chmod($path, 0660);
+    }
+
+    return $written;
+}
+
+function aetherpanel_save_control_db_settings(
+    bool $enabled,
+    string $driver,
+    string $host,
+    string $port,
+    string $database,
+    string $username,
+    string $password,
+    string $sslMode,
+    string $caPath = ''
+): array {
+    $driver = trim($driver);
+    $host = trim($host);
+    $port = trim($port);
+    $database = trim($database);
+    $username = trim($username);
+    $password = trim($password);
+    $sslMode = trim($sslMode);
+    $caPath = trim($caPath);
+
+    if (!in_array($driver, ['mysql', 'mariadb', 'pgsql'], true)) {
+        return ['ok' => false, 'message' => 'Choose mysql, mariadb, or pgsql for the control database lane.'];
+    }
+
+    if ($port === '') {
+        $port = aetherpanel_default_db_port($driver);
+    }
+
+    if (!preg_match('/^\d{2,5}$/', $port)) {
+        return ['ok' => false, 'message' => 'Control database port must be numeric.'];
+    }
+
+    if ($enabled) {
+        foreach ([
+            'host' => $host,
+            'database' => $database,
+            'username' => $username,
+        ] as $field => $value) {
+            if ($value === '') {
+                return ['ok' => false, 'message' => sprintf('Control database %s is required before enabling this lane.', $field)];
+            }
+        }
+    }
+
+    if ($sslMode === '') {
+        $sslMode = 'preferred';
+    }
+
+    $config = [
+        'enabled' => $enabled,
+        'driver' => $driver,
+        'host' => $host,
+        'port' => $port,
+        'database' => $database,
+        'username' => $username,
+        'password' => $password,
+        'ssl_mode' => $sslMode,
+        'ca_path' => $caPath,
+    ];
+
+    if (!aetherpanel_save_control_db_config($config)) {
+        return ['ok' => false, 'message' => 'Could not save the control database settings on this server yet.'];
+    }
+
+    aetherpanel_write_control_db_env_file($config);
+    aetherpanel_save_control_db_status([
+        'checked_at' => null,
+        'ok' => false,
+        'message' => $enabled
+            ? 'Configuration changed. Run a connection test before trusting this control database lane.'
+            : 'Control database lane is disabled on this server.',
+        'latency_ms' => null,
+        'driver' => $driver,
+        'server_version' => null,
+        'details' => [],
+    ]);
+
+    return [
+        'ok' => true,
+        'message' => $enabled
+            ? 'Control database settings saved for this server.'
+            : 'Control database settings saved, but the lane is disabled.',
+    ];
+}
+
+function aetherpanel_test_control_db_connection(array $config): array
+{
+    $driver = trim((string)($config['driver'] ?? 'mysql'));
+    $runtimeDriver = aetherpanel_control_db_runtime_driver($driver);
+    $host = trim((string)($config['host'] ?? ''));
+    $port = trim((string)($config['port'] ?? ''));
+    $database = trim((string)($config['database'] ?? ''));
+    $username = trim((string)($config['username'] ?? ''));
+    $password = (string)($config['password'] ?? '');
+    $sslMode = trim((string)($config['ssl_mode'] ?? ''));
+    $caPath = trim((string)($config['ca_path'] ?? ''));
+
+    if (empty($config['enabled'])) {
+        return ['ok' => false, 'message' => 'Enable the control database lane before testing it.'];
+    }
+
+    foreach ([
+        'host' => $host,
+        'database' => $database,
+        'username' => $username,
+    ] as $field => $value) {
+        if ($value === '') {
+            return ['ok' => false, 'message' => sprintf('Control database %s is required before testing.', $field)];
+        }
+    }
+
+    if ($port === '') {
+        $port = aetherpanel_default_db_port($driver);
+    }
+
+    $startedAt = microtime(true);
+    $status = [
+        'checked_at' => gmdate('c'),
+        'ok' => false,
+        'message' => '',
+        'latency_ms' => null,
+        'driver' => $driver,
+        'server_version' => null,
+        'details' => [
+            'host' => $host,
+            'port' => $port,
+            'database' => $database,
+            'ssl_mode' => $sslMode !== '' ? $sslMode : null,
+            'ca_path' => $caPath !== '' ? $caPath : null,
+        ],
+    ];
+
+    try {
+        if ($runtimeDriver === 'pgsql') {
+            if (!extension_loaded('pdo_pgsql')) {
+                throw new RuntimeException('pdo_pgsql is not installed on this server yet.');
+            }
+
+            $dsn = sprintf(
+                'pgsql:host=%s;port=%s;dbname=%s%s',
+                $host,
+                $port,
+                $database,
+                $sslMode !== '' ? ';sslmode=' . $sslMode : ''
+            );
+
+            $pdo = new PDO($dsn, $username, $password, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_TIMEOUT => 5,
+            ]);
+            $version = $pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
+            $pdo = null;
+        } else {
+            if (!function_exists('mysqli_init')) {
+                throw new RuntimeException('mysqli is not installed on this server yet.');
+            }
+
+            $mysqli = mysqli_init();
+            if (!$mysqli instanceof mysqli) {
+                throw new RuntimeException('Could not initialize mysqli for the control database test.');
+            }
+
+            mysqli_options($mysqli, MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+            if ($caPath !== '') {
+                mysqli_ssl_set($mysqli, null, null, $caPath, null, null);
+            }
+
+            $flags = 0;
+            if ($sslMode !== '' && strtolower($sslMode) !== 'disable') {
+                $flags |= MYSQLI_CLIENT_SSL;
+            }
+
+            if (!@mysqli_real_connect($mysqli, $host, $username, $password, $database, (int)$port, null, $flags)) {
+                throw new RuntimeException(mysqli_connect_error() ?: 'MySQL/MariaDB connection failed.');
+            }
+
+            $version = mysqli_get_server_info($mysqli);
+            mysqli_close($mysqli);
+        }
+
+        $status['ok'] = true;
+        $status['server_version'] = $version;
+        $status['latency_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
+        $status['message'] = sprintf(
+            'Connected to the external %s control database in %d ms.',
+            $driver,
+            (int)$status['latency_ms']
+        );
+    } catch (Throwable $exception) {
+        $status['ok'] = false;
+        $status['latency_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
+        $status['message'] = $exception->getMessage();
+    }
+
+    aetherpanel_save_control_db_status($status);
+    return [
+        'ok' => $status['ok'],
+        'message' => $status['message'],
+        'status' => $status,
+    ];
+}
+
+function aetherpanel_control_db_env_snippet(array $config): string
+{
+    if (empty($config['enabled'])) {
+        return "# External control database is still pending on this server.\n"
+            . '# Save and test the real managed database details when they exist.';
+    }
+
+    $lines = [
+        'DB_CONNECTION=' . ($config['driver'] ?? 'mysql'),
+        'DB_HOST=' . ($config['host'] ?? ''),
+        'DB_PORT=' . ($config['port'] ?? ''),
+        'DB_DATABASE=' . ($config['database'] ?? ''),
+        'DB_USERNAME=' . ($config['username'] ?? ''),
+        'DB_PASSWORD=' . ($config['password'] ?? ''),
+    ];
+
+    $driver = (string)($config['driver'] ?? 'mysql');
+    $sslMode = trim((string)($config['ssl_mode'] ?? ''));
+    $caPath = trim((string)($config['ca_path'] ?? ''));
+
+    if ($driver === 'pgsql') {
+        $lines[] = 'DB_SSLMODE=' . ($sslMode !== '' ? $sslMode : 'prefer');
+    } elseif ($caPath !== '') {
+        $lines[] = 'MYSQL_ATTR_SSL_CA=' . $caPath;
+    }
+
+    return implode(PHP_EOL, $lines);
+}
+
 function aetherpanel_login_endpoint(array $node): string
 {
     $ip = trim((string)($node['tailscale_ip'] ?? ''));
@@ -397,7 +796,7 @@ function aetherpanel_default_onboarding(): array
             [
                 'id' => 'register_controller_identity',
                 'title' => 'Register controller identity',
-                'summary' => 'Confirm my.net30hosting.com and the first controller node metadata.',
+                'summary' => 'When the control API is live, attach this server to the controller identity and redeem its join/license key.',
                 'done' => false,
             ],
             [
@@ -409,7 +808,7 @@ function aetherpanel_default_onboarding(): array
             [
                 'id' => 'confirm_tailscale_bind',
                 'title' => 'Confirm Tailscale bind',
-                'summary' => 'Keep the local lighttpd panel reachable only over the tailnet.',
+                'summary' => 'Keep the panel on this server reachable only over the tailnet.',
                 'done' => false,
             ],
             [
@@ -422,6 +821,12 @@ function aetherpanel_default_onboarding(): array
                 'id' => 'set_default_web_stack',
                 'title' => 'Set default web stack',
                 'summary' => 'Use Apache, PHP 8.5, website-local database access, Let’s Encrypt, msmtp, and jailed SFTP as the baseline.',
+                'done' => false,
+            ],
+            [
+                'id' => 'connect_control_database',
+                'title' => 'Connect control database',
+                'summary' => 'When the free control database exists, point panel state, sessions, cache, jobs, and fleet inventory at it.',
                 'done' => false,
             ],
             [
@@ -461,6 +866,7 @@ function aetherpanel_onboarding_flag_map(): array
 {
     return [
         'lock_ssh_to_known_ips' => 'ssh_known_ip_lock',
+        'connect_control_database' => 'control_database_ready',
         'set_backup_target' => 'backup_target_ready',
         'add_first_hosting_package' => 'hosting_package_ready',
         'import_existing_sites' => 'import_ready',
@@ -513,10 +919,19 @@ function aetherpanel_load_onboarding(array $node, array $branding, array $access
 
     $knownUsers = array_values(array_filter((array)($accessModel['users'] ?? []), static fn ($user): bool => is_array($user)));
     $hasExtraUser = count($knownUsers) > 1;
-    $hasController = trim((string)($node['controller_url'] ?? '')) !== '';
+    $hasController = trim((string)($node['controller_url'] ?? '')) !== ''
+        || trim((string)($node['controller_api_url'] ?? '')) !== ''
+        || !empty($node['join_key_present']);
     $hasTailnet = trim((string)($node['tailscale_ip'] ?? '')) !== '';
     $hasWebRole = in_array('web', array_map('strval', (array)($node['roles'] ?? [])), true);
     $hasBranding = trim((string)($branding['organization_name'] ?? '')) !== '' && trim((string)($branding['system_email_from'] ?? '')) !== '';
+    $controlDb = aetherpanel_load_control_db_config();
+    $controlDbStatus = aetherpanel_load_control_db_status();
+    $hasControlDb = !empty($controlDb['enabled'])
+        && trim((string)($controlDb['host'] ?? '')) !== ''
+        && trim((string)($controlDb['database'] ?? '')) !== ''
+        && trim((string)($controlDb['username'] ?? '')) !== ''
+        && !empty($controlDbStatus['ok']);
 
     $computed = [
         'register_controller_identity' => $hasController && $hasBranding,
@@ -524,6 +939,7 @@ function aetherpanel_load_onboarding(array $node, array $branding, array $access
         'confirm_tailscale_bind' => $hasTailnet,
         'lock_ssh_to_known_ips' => (bool)($config['ssh_known_ip_lock'] ?? false),
         'set_default_web_stack' => $hasWebRole,
+        'connect_control_database' => $hasControlDb,
         'set_backup_target' => (bool)($config['backup_target_ready'] ?? false),
         'add_first_role_user' => $hasExtraUser,
         'add_first_hosting_package' => (bool)($config['hosting_package_ready'] ?? false),
@@ -668,14 +1084,14 @@ function aetherpanel_add_local_user(string $username, string $displayName, array
         }
 
         if (strcasecmp((string)($user['username'] ?? ''), $username) === 0) {
-            return ['ok' => false, 'message' => 'That username already exists in the local panel.'];
+            return ['ok' => false, 'message' => 'That username already exists on this server panel.'];
         }
     }
 
     $plainPassword = trim($password) !== '' ? trim($password) : aetherpanel_random_password();
 
     if (!aetherpanel_write_htpasswd_entry($username, $plainPassword)) {
-        return ['ok' => false, 'message' => 'Could not update the local lighttpd password file yet.'];
+        return ['ok' => false, 'message' => 'Could not update the server panel password file yet.'];
     }
 
     $accessModel['users'][] = [

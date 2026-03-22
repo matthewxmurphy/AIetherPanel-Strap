@@ -8,8 +8,8 @@ AETHERPANEL_VERSION="0.1.2"
 PROFILE="hybrid"
 NODE_NAME="$(hostname -s 2>/dev/null || hostname)"
 ROLES=""
-CONTROLLER_URL="https://my.net30hosting.com"
-CONTROLLER_API_URL="https://my.net30hosting.com/api"
+CONTROLLER_URL=""
+CONTROLLER_API_URL=""
 PUBLIC_HOSTNAME=""
 PANEL_USER="aetherpanel"
 PANEL_GROUP="www-data"
@@ -21,9 +21,10 @@ PANEL_LOG="/var/log/aetherpanel"
 PANEL_APP="${PANEL_ROOT}/ui"
 PANEL_WWW="${PANEL_APP}/public"
 LIGHTTPD_TEMPLATE=""
+LIGHTTPD_SERVICE_TEMPLATE=""
 PANEL_UI_SOURCE=""
 TAILSCALE_IP=""
-ADMIN_USER="admin"
+ADMIN_USER=""
 ADMIN_PASSWORD=""
 DRY_RUN="0"
 PHP_FPM_SOCKET=""
@@ -39,6 +40,15 @@ TAILSCALE_ARGS=""
 SET_HOSTNAME="0"
 SSH_SOURCE_CACHE=""
 JOIN_KEY=""
+CONTROL_DB_ENABLED="0"
+CONTROL_DB_DRIVER="mysql"
+CONTROL_DB_HOST=""
+CONTROL_DB_PORT=""
+CONTROL_DB_DATABASE=""
+CONTROL_DB_USERNAME=""
+CONTROL_DB_PASSWORD=""
+CONTROL_DB_SSL_MODE="preferred"
+CONTROL_DB_CA_PATH=""
 
 usage() {
   cat <<'EOF'
@@ -53,12 +63,23 @@ Options:
   --roles controller,web,database
   --controller-url URL
   --controller-api-url URL
+  --control-panel-api-url URL
   --join-key KEY
+  --reg-key KEY
   --public-hostname HOSTNAME
   --panel-port PORT
   --admin-user USER
   --admin-password PASSWORD
   --operator-user USER
+  --control-db-enabled
+  --control-db-driver mysql|mariadb|pgsql
+  --control-db-host HOST
+  --control-db-port PORT
+  --control-db-database NAME
+  --control-db-username USER
+  --control-db-password PASSWORD
+  --control-db-ssl-mode MODE
+  --control-db-ca-path /path/to/ca.pem
   --ssh-pub-source /path/to/public-keys.txt
   --ssh-pub-url URL
   --tailscale-authkey KEY
@@ -69,12 +90,14 @@ Options:
   -h, --help
 
 Notes:
-  - The local panel is bound to the Tailscale IPv4 by default.
-  - Apache stays available for websites. lighttpd is only for the local AetherPanel UI.
+  - The per-server panel is bound to the Tailscale IPv4 by default.
+  - Apache stays available for websites. AetherPanel lighttpd runs as its own dedicated service.
   - If MariaDB/Postgres is installed here, that is for websites, not panel state.
   - Fail2ban is local. CrowdSec is handled remotely and is not installed by this script.
   - This single script is the normal node bootstrap path.
   - The separate host-apply script is only for later re-apply/repair.
+  - If no panel login user is provided, the installer uses the operator user and generates a temporary password.
+  - If the controller API, join key, or external control database are not ready yet, omit those flags for now.
   - Use controller for a dedicated controller node, application for a website/application host,
     mail-test for the future testing mail node, and hybrid for the current all-in-one baseline.
 EOF
@@ -123,7 +146,11 @@ parse_args() {
         CONTROLLER_URL="${2:-}"; shift 2 ;;
       --controller-api-url)
         CONTROLLER_API_URL="${2:-}"; shift 2 ;;
+      --control-panel-api-url)
+        CONTROLLER_API_URL="${2:-}"; shift 2 ;;
       --join-key)
+        JOIN_KEY="${2:-}"; shift 2 ;;
+      --reg-key)
         JOIN_KEY="${2:-}"; shift 2 ;;
       --public-hostname)
         PUBLIC_HOSTNAME="${2:-}"; shift 2 ;;
@@ -135,6 +162,24 @@ parse_args() {
         ADMIN_PASSWORD="${2:-}"; shift 2 ;;
       --operator-user)
         OPERATOR_USER="${2:-}"; shift 2 ;;
+      --control-db-enabled)
+        CONTROL_DB_ENABLED="1"; shift ;;
+      --control-db-driver)
+        CONTROL_DB_DRIVER="${2:-}"; shift 2 ;;
+      --control-db-host)
+        CONTROL_DB_HOST="${2:-}"; shift 2 ;;
+      --control-db-port)
+        CONTROL_DB_PORT="${2:-}"; shift 2 ;;
+      --control-db-database)
+        CONTROL_DB_DATABASE="${2:-}"; shift 2 ;;
+      --control-db-username)
+        CONTROL_DB_USERNAME="${2:-}"; shift 2 ;;
+      --control-db-password)
+        CONTROL_DB_PASSWORD="${2:-}"; shift 2 ;;
+      --control-db-ssl-mode)
+        CONTROL_DB_SSL_MODE="${2:-}"; shift 2 ;;
+      --control-db-ca-path)
+        CONTROL_DB_CA_PATH="${2:-}"; shift 2 ;;
       --ssh-pub-source)
         SSH_PUB_SOURCE="${2:-}"; shift 2 ;;
       --ssh-pub-url)
@@ -164,7 +209,7 @@ apply_profile_defaults() {
       [ -n "$ROLES" ] || ROLES="controller,web,database"
       ;;
     controller)
-      PROFILE_DESCRIPTION="Dedicated controller node with the local panel and fleet/operator baseline."
+      PROFILE_DESCRIPTION="Dedicated controller node with the per-server panel and fleet/operator baseline."
       [ -n "$ROLES" ] || ROLES="controller"
       ;;
     application|app)
@@ -191,6 +236,16 @@ apply_profile_defaults() {
       fail "Unknown profile: $PROFILE"
       ;;
   esac
+}
+
+normalize_login_defaults() {
+  if [ -z "$ADMIN_USER" ]; then
+    ADMIN_USER="$OPERATOR_USER"
+  fi
+
+  if [ -z "$ADMIN_USER" ]; then
+    ADMIN_USER="admin"
+  fi
 }
 
 has_role() {
@@ -236,7 +291,34 @@ detect_tailscale_ip() {
     TAILSCALE_IP="$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
   fi
   if [ -z "$TAILSCALE_IP" ]; then
-    fail "No Tailscale IPv4 detected. Bring Tailscale up before binding the local panel."
+    fail "No Tailscale IPv4 detected. Bring Tailscale up before binding the panel on this server."
+  fi
+}
+
+validate_control_db_config() {
+  case "$CONTROL_DB_DRIVER" in
+    mysql|mariadb|pgsql) ;;
+    *)
+      fail "Unsupported control database driver: $CONTROL_DB_DRIVER"
+      ;;
+  esac
+
+  if [ -z "$CONTROL_DB_PORT" ]; then
+    if [ "$CONTROL_DB_DRIVER" = "pgsql" ]; then
+      CONTROL_DB_PORT="5432"
+    else
+      CONTROL_DB_PORT="3306"
+    fi
+  fi
+
+  if ! printf '%s' "$CONTROL_DB_PORT" | grep -Eq '^[0-9]{2,5}$'; then
+    fail "Control database port must be numeric."
+  fi
+
+  if [ "$CONTROL_DB_ENABLED" = "1" ]; then
+    [ -n "$CONTROL_DB_HOST" ] || fail "--control-db-host is required when the control database lane is enabled."
+    [ -n "$CONTROL_DB_DATABASE" ] || fail "--control-db-database is required when the control database lane is enabled."
+    [ -n "$CONTROL_DB_USERNAME" ] || fail "--control-db-username is required when the control database lane is enabled."
   fi
 }
 
@@ -266,9 +348,11 @@ stage_support_tree() {
   [ -n "$STEP_CACHE_DIR" ] || STEP_CACHE_DIR="$(mktemp -d /tmp/aetherpanel-install.XXXXXX)"
   PANEL_UI_SOURCE="$STEP_CACHE_DIR/ui"
   LIGHTTPD_TEMPLATE="$STEP_CACHE_DIR/lighttpd-aetherpanel.conf.template"
+  LIGHTTPD_SERVICE_TEMPLATE="$STEP_CACHE_DIR/aetherpanel-lighttpd.service.template"
 
   run_cmd "install -d -m 0755 '$PANEL_UI_SOURCE/lib' '$PANEL_UI_SOURCE/public/assets'"
   stage_support_file "conf/lighttpd-aetherpanel.conf.template" "$LIGHTTPD_TEMPLATE"
+  stage_support_file "conf/aetherpanel-lighttpd.service.template" "$LIGHTTPD_SERVICE_TEMPLATE"
   stage_support_file "ui/lib/bootstrap.php" "$PANEL_UI_SOURCE/lib/bootstrap.php"
   stage_support_file "ui/public/index.php" "$PANEL_UI_SOURCE/public/index.php"
   stage_support_file "ui/public/assets/aetherpanel.css" "$PANEL_UI_SOURCE/public/assets/aetherpanel.css"
@@ -303,6 +387,8 @@ install_packages() {
     php-cli
     php-curl
     php-fpm
+    php-mysql
+    php-pgsql
     php-mbstring
     php-xml
     php-zip
@@ -385,6 +471,7 @@ ROLES=${ROLES}
 OPERATOR_USER=${OPERATOR_USER}
 CONTROLLER_URL=${CONTROLLER_URL}
 CONTROLLER_API_URL=${CONTROLLER_API_URL}
+JOIN_KEY=${JOIN_KEY}
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME}
 TAILSCALE_IP=${TAILSCALE_IP}
 PANEL_PORT=${PANEL_PORT}
@@ -397,11 +484,18 @@ EOF
 }
 
 write_join_seed() {
+  local join_mode="pending-license"
+  if [ -n "$JOIN_KEY" ]; then
+    join_mode="join"
+  elif [ -n "$CONTROLLER_URL" ] || [ -n "$CONTROLLER_API_URL" ]; then
+    join_mode="controller-known"
+  fi
+
   cat <<EOF >/tmp/aetherpanel-join.json
 {
   "controller_url": "${CONTROLLER_URL}",
   "controller_api_url": "${CONTROLLER_API_URL}",
-  "join_mode": "$([ -n "$JOIN_KEY" ] && printf 'join' || printf 'bootstrap')",
+  "join_mode": "${join_mode}",
   "join_key_present": $([ -n "$JOIN_KEY" ] && printf 'true' || printf 'false'),
   "profile": "${PROFILE}",
   "roles": "$(printf '%s' "$ROLES")"
@@ -444,12 +538,85 @@ EOF
   run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-branding.json $PANEL_VAR/state/branding.json"
 }
 
+write_control_db_seed() {
+  local enabled_json="false"
+  local driver="$CONTROL_DB_DRIVER"
+  local host=""
+  local port=""
+  local database=""
+  local username=""
+  local password=""
+  local ssl_mode=""
+  local ca_path=""
+
+  [ "$CONTROL_DB_ENABLED" = "1" ] && enabled_json="true"
+  if [ "$CONTROL_DB_ENABLED" = "1" ]; then
+    host="$CONTROL_DB_HOST"
+    port="$CONTROL_DB_PORT"
+    database="$CONTROL_DB_DATABASE"
+    username="$CONTROL_DB_USERNAME"
+    password="$CONTROL_DB_PASSWORD"
+    ssl_mode="$CONTROL_DB_SSL_MODE"
+    ca_path="$CONTROL_DB_CA_PATH"
+  fi
+
+  jq -n \
+    --argjson enabled "$enabled_json" \
+    --arg driver "$driver" \
+    --arg host "$host" \
+    --arg port "$port" \
+    --arg database "$database" \
+    --arg username "$username" \
+    --arg password "$password" \
+    --arg ssl_mode "$ssl_mode" \
+    --arg ca_path "$ca_path" \
+    '{
+      enabled: $enabled,
+      driver: $driver,
+      host: $host,
+      port: $port,
+      database: $database,
+      username: $username,
+      password: $password,
+      ssl_mode: $ssl_mode,
+      ca_path: $ca_path
+    }' >/tmp/aetherpanel-control-db.json
+  run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-control-db.json $PANEL_VAR/state/control-db.json"
+}
+
+write_control_db_env_seed() {
+  if [ "$CONTROL_DB_ENABLED" != "1" ]; then
+    cat <<'EOF' >/tmp/aetherpanel-controller-db.env
+# External control database is still pending on this server.
+# Save and test the real managed database details from the AetherPanel UI when they exist.
+EOF
+    run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-controller-db.env $PANEL_VAR/state/controller-db.env"
+    return 0
+  fi
+
+  {
+    printf 'DB_CONNECTION=%s\n' "$CONTROL_DB_DRIVER"
+    printf 'DB_HOST=%s\n' "$CONTROL_DB_HOST"
+    printf 'DB_PORT=%s\n' "$CONTROL_DB_PORT"
+    printf 'DB_DATABASE=%s\n' "$CONTROL_DB_DATABASE"
+    printf 'DB_USERNAME=%s\n' "$CONTROL_DB_USERNAME"
+    printf 'DB_PASSWORD=%s\n' "$CONTROL_DB_PASSWORD"
+    if [ "$CONTROL_DB_DRIVER" = "pgsql" ]; then
+      printf 'DB_SSLMODE=%s\n' "$CONTROL_DB_SSL_MODE"
+    elif [ -n "$CONTROL_DB_CA_PATH" ]; then
+      printf 'MYSQL_ATTR_SSL_CA=%s\n' "$CONTROL_DB_CA_PATH"
+    fi
+  } >/tmp/aetherpanel-controller-db.env
+  run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-controller-db.env $PANEL_VAR/state/controller-db.env"
+}
+
 write_onboarding_seed() {
   cat <<'EOF' >/tmp/aetherpanel-onboarding.json
 {
   "title": "Your account setup",
   "subtitle": "Finish the first fleet steps before handing real websites and customers to AetherPanel.",
   "ssh_known_ip_lock": false,
+  "control_database_ready": false,
   "backup_target_ready": false,
   "hosting_package_ready": false,
   "import_ready": false,
@@ -457,7 +624,7 @@ write_onboarding_seed() {
     {
       "id": "register_controller_identity",
       "title": "Register controller identity",
-      "summary": "Confirm my.net30hosting.com and the first controller node metadata."
+      "summary": "When the control API is live, attach this server to the controller identity and redeem its join/license key."
     },
     {
       "id": "add_first_node",
@@ -467,7 +634,7 @@ write_onboarding_seed() {
     {
       "id": "confirm_tailscale_bind",
       "title": "Confirm Tailscale bind",
-      "summary": "Keep the local lighttpd panel reachable only over the tailnet."
+      "summary": "Keep the panel on this server reachable only over the tailnet."
     },
     {
       "id": "lock_ssh_to_known_ips",
@@ -478,6 +645,11 @@ write_onboarding_seed() {
       "id": "set_default_web_stack",
       "title": "Set default web stack",
       "summary": "Use Apache, PHP 8.5, website-local database access, Let’s Encrypt, msmtp, jailed SFTP, and Sequel Ace-friendly operator access as the baseline."
+    },
+    {
+      "id": "connect_control_database",
+      "title": "Connect control database",
+      "summary": "When the free control database exists, point panel state, sessions, cache, jobs, and fleet inventory at it."
     },
     {
       "id": "set_backup_target",
@@ -732,11 +904,18 @@ write_lighttpd_config() {
     -e "s|__ETC__|$PANEL_ETC|g" \
     -e "s|__NODE_NAME__|$NODE_NAME|g" \
     -e "s|__PHP_FPM_SOCKET__|$PHP_FPM_SOCKET|g" \
+    -e "s|__PANEL_USER__|$PANEL_USER|g" \
+    -e "s|__PANEL_GROUP__|$PANEL_GROUP|g" \
+    -e "s|__PANEL_VAR__|$PANEL_VAR|g" \
     "$LIGHTTPD_TEMPLATE" >/tmp/aetherpanel-lighttpd.conf
-  run_cmd "install -m 0644 /tmp/aetherpanel-lighttpd.conf /etc/lighttpd/conf-available/50-aetherpanel.conf"
-  run_cmd "lighty-enable-mod auth setenv accesslog fastcgi"
-  run_cmd "ln -sf ../conf-available/50-aetherpanel.conf /etc/lighttpd/conf-enabled/50-aetherpanel.conf"
-  run_cmd "lighttpd -tt -f /etc/lighttpd/lighttpd.conf"
+  run_cmd "install -m 0644 /tmp/aetherpanel-lighttpd.conf '$PANEL_ETC/lighttpd.conf'"
+
+  sed \
+    -e "s|__LIGHTTPD_BIN__|$(command -v lighttpd)|g" \
+    -e "s|__CONFIG__|$PANEL_ETC/lighttpd.conf|g" \
+    "$LIGHTTPD_SERVICE_TEMPLATE" >/tmp/aetherpanel-lighttpd.service
+  run_cmd "install -m 0644 /tmp/aetherpanel-lighttpd.service /etc/systemd/system/aetherpanel-lighttpd.service"
+  run_cmd "lighttpd -tt -f '$PANEL_ETC/lighttpd.conf'"
 }
 
 enable_apache_php_baseline() {
@@ -756,7 +935,9 @@ enable_apache_php_baseline() {
 }
 
 enable_services() {
-  run_cmd "systemctl enable --now lighttpd"
+  run_cmd "systemctl disable --now lighttpd || true"
+  run_cmd "systemctl daemon-reload"
+  run_cmd "systemctl enable --now aetherpanel-lighttpd"
   if has_role web; then
     enable_apache_php_baseline
     run_cmd "systemctl enable --now apache2"
@@ -825,6 +1006,16 @@ load_step_scripts() {
 }
 
 print_summary() {
+  local controller_label="${CONTROLLER_URL:-Pending until the control API is ready}"
+  local controller_api_label="${CONTROLLER_API_URL:-Pending until the control API is ready}"
+  local join_mode_label="pending-license"
+
+  if [ -n "$JOIN_KEY" ]; then
+    join_mode_label="join"
+  elif [ -n "$CONTROLLER_URL" ] || [ -n "$CONTROLLER_API_URL" ]; then
+    join_mode_label="controller-known"
+  fi
+
   cat <<EOF
 
 AetherPanel bootstrap complete.
@@ -833,18 +1024,20 @@ Node:          ${NODE_NAME}
 Profile:       ${PROFILE}
 Roles:         ${ROLES}
 Tailnet bind:  http://${TAILSCALE_IP}:${PANEL_PORT}
-Controller:    ${CONTROLLER_URL}
-Controller API:${CONTROLLER_API_URL}
-Join mode:     $([ -n "$JOIN_KEY" ] && printf 'join' || printf 'bootstrap')
+Controller:    ${controller_label}
+Controller API:${controller_api_label}
+Join mode:     ${join_mode_label}
 Admin user:    ${ADMIN_USER}
 Admin pass:    ${ADMIN_PASSWORD}
 
-Branding seed: ${PANEL_VAR}/state/branding.json
-Role seed:     ${PANEL_VAR}/state/users.toon
-Node config:   ${PANEL_ETC}/node.env
+Branding seed:  ${PANEL_VAR}/state/branding.json
+Control DB:     ${PANEL_VAR}/state/control-db.json
+Control DB env: ${PANEL_VAR}/state/controller-db.env
+Role seed:      ${PANEL_VAR}/state/users.toon
+Node config:    ${PANEL_ETC}/node.env
 
 Remember:
-- lighttpd is for the local AetherPanel UI
+- lighttpd is the dedicated per-server AetherPanel service on this host
 - Apache only installs when the profile carries the web role
 - Fail2ban is local. CrowdSec stays remote-managed.
 - host MariaDB/Postgres is for websites, not panel state
@@ -857,6 +1050,8 @@ main() {
   trap cleanup EXIT
   parse_args "$@"
   apply_profile_defaults
+  normalize_login_defaults
+  validate_control_db_config
   load_step_scripts
   aetherpanel_step_preflight
   aetherpanel_step_packages

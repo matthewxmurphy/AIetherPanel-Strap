@@ -3,6 +3,14 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/lib/bootstrap.php';
 
+$scriptName = (string)($_SERVER['AETHERPANEL_SCRIPT_PATH'] ?? ($_SERVER['SCRIPT_NAME'] ?? '/aetherpanel/ui/public/index.php'));
+$scriptPath = $scriptName !== '' ? $scriptName : '/aetherpanel/ui/public/index.php';
+$assetBase = trim((string)($_SERVER['AETHERPANEL_ASSET_PREFIX'] ?? ''));
+if ($assetBase === '') {
+    $assetBase = rtrim(str_replace('\\', '/', dirname($scriptPath)), '/');
+}
+$assetPrefix = $assetBase !== '' ? $assetBase : '';
+
 $saveState = $_GET['saved'] ?? '';
 $saveMessage = '';
 $saveError = '';
@@ -13,7 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'set-step' && $stepId !== '') {
         $done = trim((string)($_POST['done'] ?? '0')) === '1';
         if (aetherpanel_set_onboarding_step_state($stepId, $done)) {
-            header('Location: /?saved=' . ($done ? 'done' : 'undone') . '#setup');
+            header('Location: ' . $scriptPath . '?saved=' . ($done ? 'done' : 'undone') . '#setup');
             exit;
         }
         $saveError = 'Could not save the onboarding state yet.';
@@ -31,6 +39,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $saveError = (string)($result['message'] ?? 'Could not create the local operator yet.');
         }
+    } elseif ($action === 'save-ai') {
+        $existingAi = aetherpanel_load_ai_config();
+        $existingOllama = (array)($existingAi['ollama_cloud'] ?? []);
+        $apiKeyInput = trim((string)($_POST['ollama_api_key'] ?? ''));
+        $apiKey = $apiKeyInput !== '' ? $apiKeyInput : (string)($existingOllama['api_key'] ?? '');
+        $result = aetherpanel_save_ollama_cloud_settings(
+            trim((string)($_POST['ollama_enabled'] ?? '0')) === '1',
+            $apiKey,
+            (string)($_POST['ollama_model'] ?? ''),
+            (string)($_POST['ollama_base_url'] ?? '')
+        );
+
+        if (!empty($result['ok'])) {
+            $saveMessage = (string)($result['message'] ?? 'Ollama Cloud settings saved.');
+        } else {
+            $saveError = (string)($result['message'] ?? 'Could not save the Ollama Cloud settings yet.');
+        }
+    } elseif ($action === 'save-control-db') {
+        $existingControlDb = aetherpanel_load_control_db_config();
+        $passwordInput = trim((string)($_POST['control_db_password'] ?? ''));
+        $password = $passwordInput !== '' ? $passwordInput : (string)($existingControlDb['password'] ?? '');
+        $result = aetherpanel_save_control_db_settings(
+            trim((string)($_POST['control_db_enabled'] ?? '0')) === '1',
+            (string)($_POST['control_db_driver'] ?? ''),
+            (string)($_POST['control_db_host'] ?? ''),
+            (string)($_POST['control_db_port'] ?? ''),
+            (string)($_POST['control_db_database'] ?? ''),
+            (string)($_POST['control_db_username'] ?? ''),
+            $password,
+            (string)($_POST['control_db_ssl_mode'] ?? ''),
+            (string)($_POST['control_db_ca_path'] ?? '')
+        );
+
+        if (!empty($result['ok'])) {
+            $saveMessage = (string)($result['message'] ?? 'Control database settings saved.');
+        } else {
+            $saveError = (string)($result['message'] ?? 'Could not save the control database settings yet.');
+        }
+    } elseif ($action === 'test-control-db') {
+        $existingControlDb = aetherpanel_load_control_db_config();
+        $passwordInput = trim((string)($_POST['control_db_password'] ?? ''));
+        $password = $passwordInput !== '' ? $passwordInput : (string)($existingControlDb['password'] ?? '');
+        $saveResult = aetherpanel_save_control_db_settings(
+            trim((string)($_POST['control_db_enabled'] ?? '0')) === '1',
+            (string)($_POST['control_db_driver'] ?? ''),
+            (string)($_POST['control_db_host'] ?? ''),
+            (string)($_POST['control_db_port'] ?? ''),
+            (string)($_POST['control_db_database'] ?? ''),
+            (string)($_POST['control_db_username'] ?? ''),
+            $password,
+            (string)($_POST['control_db_ssl_mode'] ?? ''),
+            (string)($_POST['control_db_ca_path'] ?? '')
+        );
+
+        if (empty($saveResult['ok'])) {
+            $saveError = (string)($saveResult['message'] ?? 'Could not save the control database settings before testing.');
+        } else {
+            $controlDb = aetherpanel_load_control_db_config();
+            $testResult = aetherpanel_test_control_db_connection($controlDb);
+            if (!empty($testResult['ok'])) {
+                $saveMessage = (string)($testResult['message'] ?? 'External control database connection succeeded.');
+            } else {
+                $saveError = (string)($testResult['message'] ?? 'External control database connection failed.');
+            }
+        }
     }
 }
 
@@ -40,6 +113,10 @@ $node = aetherpanel_node_context();
 $currentUser = aetherpanel_current_user($accessModel);
 $currentRoles = aetherpanel_roles_for_user($currentUser, $accessModel);
 $permissions = aetherpanel_permission_list($currentRoles);
+$aiConfig = aetherpanel_load_ai_config();
+$ollamaCloud = (array)($aiConfig['ollama_cloud'] ?? []);
+$controlDb = aetherpanel_load_control_db_config();
+$controlDbStatus = aetherpanel_load_control_db_status();
 $onboarding = aetherpanel_load_onboarding($node, $branding, $accessModel);
 $onboardingProgress = aetherpanel_onboarding_progress($onboarding);
 
@@ -52,6 +129,16 @@ $publicDomains = array_values(array_filter(array_map('strval', (array)($branding
 $primaryRole = $currentRoles[0]['label'] ?? 'Role assignment needed';
 $loginImage = trim((string)($branding['login_page_image'] ?? ''));
 $compactMarkText = trim((string)($branding['compact_mark_text'] ?? 'N30')) ?: 'N30';
+$controllerUrlDisplay = trim((string)($node['controller_url'] ?? '')) !== ''
+    ? trim((string)$node['controller_url'])
+    : 'Pending until the control API is ready';
+$controllerApiDisplay = trim((string)($node['controller_api_url'] ?? '')) !== ''
+    ? trim((string)$node['controller_api_url'])
+    : 'Pending until the control API is ready';
+$joinStatusDisplay = !empty($node['join_key_present'])
+    ? 'Join/license key present'
+    : 'Waiting for the API and license lane';
+$controlDbEnvSnippet = aetherpanel_control_db_env_snippet($controlDb);
 
 if ($saveState === 'done') {
     $saveMessage = 'Checklist step marked done.';
@@ -65,7 +152,7 @@ if ($saveState === 'done') {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title><?= htmlspecialchars((string)($branding['project_name'] ?? 'AetherPanel')) ?></title>
-  <link rel="stylesheet" href="/assets/aetherpanel.css">
+  <link rel="stylesheet" href="<?= htmlspecialchars($assetPrefix . '/assets/aetherpanel.css') ?>">
   <style>
     :root {
       --ap-brand: <?= htmlspecialchars($brandColor) ?>;
@@ -109,7 +196,7 @@ if ($saveState === 'done') {
         <a href="#roles">Roles</a>
       </nav>
       <div class="ap-sidebar-note">
-        Tailscale-first local panel for <?= htmlspecialchars((string)($branding['owner'] ?? 'Matthew Murphy')) ?>.
+        Tailscale-first panel on this server for <?= htmlspecialchars((string)($branding['owner'] ?? 'Matthew Murphy')) ?>.
       </div>
     </aside>
 
@@ -177,7 +264,7 @@ if ($saveState === 'done') {
           <h1><?= htmlspecialchars($organizationName) ?></h1>
           <p>
             The first authenticated screen is the brand contract for <?= htmlspecialchars((string)($branding['business_end'] ?? 'AI Control Host')) ?>.
-            This lighttpd surface should only exist on the tailnet, then use login and password, then map the authenticated user into roles.
+            This lighttpd surface should only exist on the tailnet. For now it uses local access on this server, then it can hand off to the license-backed controller flow when the API lane is live.
           </p>
         </div>
         <div class="ap-hero-cards">
@@ -238,9 +325,12 @@ if ($saveState === 'done') {
             <li><span>Logout destination</span><strong><?= htmlspecialchars((string)($branding['logout_destination_url'] ?? '')) ?></strong></li>
             <li><span>Node</span><strong><?= htmlspecialchars((string)$node['node_name']) ?></strong></li>
             <li><span>Node roles</span><strong><?= htmlspecialchars(implode(', ', (array)$node['roles'])) ?></strong></li>
-            <li><span>Controller URL</span><strong><?= htmlspecialchars((string)$node['controller_url']) ?></strong></li>
+            <li><span>Controller URL</span><strong><?= htmlspecialchars($controllerUrlDisplay) ?></strong></li>
+            <li><span>Controller API</span><strong><?= htmlspecialchars($controllerApiDisplay) ?></strong></li>
+            <li><span>Join / license lane</span><strong><?= htmlspecialchars($joinStatusDisplay) ?></strong></li>
             <li><span>Enhance bridge</span><strong>A / AAAA only</strong></li>
-            <li><span>Database posture</span><strong>Website-local only</strong></li>
+            <li><span>Website database posture</span><strong>Website-local only</strong></li>
+            <li><span>Control database lane</span><strong><?= htmlspecialchars(!empty($controlDb['enabled']) ? 'External control DB' : 'Not enabled yet') ?></strong></li>
           </ul>
         </article>
 
@@ -415,6 +505,115 @@ if ($saveState === 'done') {
             <p>Preferred operator database client from trusted machines. AetherPanel should not grow a phpMyAdmin surface.</p>
             <div class="ap-role-chip">No phpMyAdmin lane</div>
           </div>
+        </article>
+
+        <article class="ap-card">
+          <div class="ap-card-heading">
+            <span class="ap-kicker">Control Database</span>
+            <h2>External panel database</h2>
+          </div>
+          <form method="post" class="ap-form-stack">
+            <label class="ap-checkbox">
+              <input type="checkbox" name="control_db_enabled" value="1"<?= !empty($controlDb['enabled']) ? ' checked' : '' ?>>
+              <span>Use the external control database for panel state on this server</span>
+            </label>
+            <div class="ap-form-grid">
+              <div>
+                <label for="ap-control-db-driver">Driver</label>
+                <select class="ap-input" id="ap-control-db-driver" name="control_db_driver">
+                  <?php foreach (['mysql', 'mariadb', 'pgsql'] as $driver): ?>
+                    <option value="<?= htmlspecialchars($driver) ?>"<?= (($controlDb['driver'] ?? 'mysql') === $driver) ? ' selected' : '' ?>><?= htmlspecialchars($driver) ?></option>
+                  <?php endforeach; ?>
+                </select>
+              </div>
+              <div>
+                <label for="ap-control-db-host">Host</label>
+                <input class="ap-input" id="ap-control-db-host" name="control_db_host" type="text" value="<?= htmlspecialchars((string)($controlDb['host'] ?? '')) ?>">
+              </div>
+              <div>
+                <label for="ap-control-db-port">Port</label>
+                <input class="ap-input" id="ap-control-db-port" name="control_db_port" type="text" value="<?= htmlspecialchars((string)($controlDb['port'] ?? '')) ?>">
+              </div>
+              <div>
+                <label for="ap-control-db-name">Database</label>
+                <input class="ap-input" id="ap-control-db-name" name="control_db_database" type="text" value="<?= htmlspecialchars((string)($controlDb['database'] ?? '')) ?>">
+              </div>
+              <div>
+                <label for="ap-control-db-username">Username</label>
+                <input class="ap-input" id="ap-control-db-username" name="control_db_username" type="text" value="<?= htmlspecialchars((string)($controlDb['username'] ?? '')) ?>">
+              </div>
+              <div>
+                <label for="ap-control-db-password">Paste new password</label>
+                <input class="ap-input" id="ap-control-db-password" name="control_db_password" type="password" autocomplete="off" placeholder="Leave blank to keep the current saved password">
+              </div>
+              <div>
+                <label for="ap-control-db-ssl-mode">SSL Mode</label>
+                <input class="ap-input" id="ap-control-db-ssl-mode" name="control_db_ssl_mode" type="text" value="<?= htmlspecialchars((string)($controlDb['ssl_mode'] ?? 'preferred')) ?>">
+              </div>
+              <div>
+                <label for="ap-control-db-ca-path">CA Path</label>
+                <input class="ap-input" id="ap-control-db-ca-path" name="control_db_ca_path" type="text" value="<?= htmlspecialchars((string)($controlDb['ca_path'] ?? '')) ?>">
+              </div>
+            </div>
+            <div class="ap-field">
+              Saved password: <?= htmlspecialchars(aetherpanel_mask_secret((string)($controlDb['password'] ?? ''))) ?>
+            </div>
+            <div class="ap-callout<?= !empty($controlDbStatus['ok']) ? ' is-success' : ' is-warning' ?>">
+              <strong>Connection status</strong>
+              <div><?= htmlspecialchars((string)($controlDbStatus['message'] ?? 'Connection has not been tested yet.')) ?></div>
+              <div class="ap-meta-line">
+                <?php if (!empty($controlDbStatus['checked_at'])): ?>
+                  <span>Last checked: <?= htmlspecialchars((string)$controlDbStatus['checked_at']) ?></span>
+                <?php endif; ?>
+                <?php if (!empty($controlDbStatus['server_version'])): ?>
+                  <span>Server: <?= htmlspecialchars((string)$controlDbStatus['server_version']) ?></span>
+                <?php endif; ?>
+                <?php if (($controlDbStatus['latency_ms'] ?? null) !== null): ?>
+                  <span>Latency: <?= htmlspecialchars((string)$controlDbStatus['latency_ms']) ?> ms</span>
+                <?php endif; ?>
+              </div>
+            </div>
+            <div class="ap-callout">
+              <strong>Controller env snippet</strong>
+              <pre class="ap-code-block"><?= htmlspecialchars($controlDbEnvSnippet) ?></pre>
+            </div>
+            <div class="ap-form-actions">
+              <button type="submit" name="action" value="save-control-db" class="ap-inline-button ap-inline-button is-secondary">Save only</button>
+              <button type="submit" name="action" value="test-control-db" class="ap-inline-button">Save and test</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="ap-card">
+          <div class="ap-card-heading">
+            <span class="ap-kicker">AI</span>
+            <h2>Ollama Cloud on this server</h2>
+          </div>
+          <form method="post" class="ap-form-stack">
+            <input type="hidden" name="action" value="save-ai">
+            <label class="ap-checkbox">
+              <input type="checkbox" name="ollama_enabled" value="1"<?= !empty($ollamaCloud['enabled']) ? ' checked' : '' ?>>
+              <span>Enable Ollama Cloud on this server</span>
+            </label>
+            <div>
+              <label for="ap-ollama-model">Model</label>
+              <input class="ap-input" id="ap-ollama-model" name="ollama_model" type="text" value="<?= htmlspecialchars((string)($ollamaCloud['model'] ?? 'nemotron-3-super:cloud')) ?>">
+            </div>
+            <div>
+              <label for="ap-ollama-base-url">Base URL</label>
+              <input class="ap-input" id="ap-ollama-base-url" name="ollama_base_url" type="text" value="<?= htmlspecialchars((string)($ollamaCloud['base_url'] ?? 'https://ollama.com/v1')) ?>">
+            </div>
+            <div>
+              <label for="ap-ollama-api-key">Paste new Ollama key</label>
+              <input class="ap-input" id="ap-ollama-api-key" name="ollama_api_key" type="password" autocomplete="off" placeholder="Leave blank to keep the current saved key">
+            </div>
+            <div class="ap-field">
+              Saved key: <?= htmlspecialchars(aetherpanel_mask_secret((string)($ollamaCloud['api_key'] ?? ''))) ?>
+            </div>
+            <div class="ap-form-actions">
+              <button type="submit" class="ap-inline-button">Save Ollama settings</button>
+            </div>
+          </form>
         </article>
       </section>
     </main>
