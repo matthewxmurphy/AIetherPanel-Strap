@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-http://100.113.185.1/aetherpanel}"
+INSTALL_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-https://raw.githubusercontent.com/matthewxmurphy/AetherPanel-Strap/main}"
 TMP_DIR="$(mktemp -d /tmp/aetherpanel-bootstrap.XXXXXX)"
 INSTALLER_PATH="${TMP_DIR}/aetherpanel-install.sh"
 
