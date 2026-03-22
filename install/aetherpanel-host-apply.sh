@@ -22,7 +22,7 @@ Usage:
   aetherpanel-host-apply.sh [options]
 
 Options:
-  --profile hybrid|controller|app|mail-test|dns|backup|custom
+  --profile hybrid|controller|application|app|mail-test|dns|backup|custom
   --roles controller,web,database
   --node-name NAME
   --operator-user USER
@@ -37,10 +37,11 @@ Options:
 Notes:
   - hybrid is the default for the current OCI production nodes.
   - controller is a lean control-panel profile.
-  - app is for website/app/database nodes without the controller role.
+  - application is for website/application/database nodes without the controller role.
   - mail-test is the testing baseline for the future mail role.
   - dns is the tiny DNS-only baseline.
   - backup is the Wasabi-target helper baseline.
+  - Fail2ban is local. CrowdSec is remote-managed and not installed here.
 EOF
 }
 
@@ -115,7 +116,7 @@ apply_profile_defaults() {
       PROFILE_DESCRIPTION="Dedicated controller node with the local panel and fleet/operator baseline."
       [ -n "$ROLES" ] || ROLES="controller"
       ;;
-    app)
+    application|app)
       PROFILE_DESCRIPTION="Website/application node with local site database support."
       [ -n "$ROLES" ] || ROLES="web,database"
       ;;
@@ -164,7 +165,6 @@ install_baseline_packages() {
   local packages=(
     ca-certificates
     certbot
-    crowdsec
     curl
     fail2ban
     gnupg
@@ -302,41 +302,6 @@ EOF
   run_cmd "install -m 0644 /tmp/aetherpanel-fail2ban.local /etc/fail2ban/jail.d/aetherpanel.local"
 }
 
-configure_crowdsec() {
-  run_cmd "install -d -m 0755 /etc/crowdsec/acquis.d"
-
-  cat <<EOF >/tmp/aetherpanel-crowdsec.yaml
-filenames:
-  - /var/log/auth.log
-labels:
-  type: syslog
-EOF
-
-  if has_role web || has_role controller; then
-    cat <<'EOF' >>/tmp/aetherpanel-crowdsec.yaml
----
-filenames:
-  - /var/log/apache2/access.log
-labels:
-  type: apache2
----
-filenames:
-  - /var/log/apache2/error.log
-labels:
-  type: apache2
-EOF
-  fi
-
-  run_cmd "install -m 0644 /tmp/aetherpanel-crowdsec.yaml /etc/crowdsec/acquis.d/aetherpanel.yaml"
-
-  if command -v cscli >/dev/null 2>&1; then
-    run_cmd "cscli collections install crowdsecurity/sshd || true"
-    if has_role web || has_role controller; then
-      run_cmd "cscli collections install crowdsecurity/apache2 || true"
-    fi
-  fi
-}
-
 apply_hostname() {
   if [ "$SET_HOSTNAME" != "1" ]; then
     return 0
@@ -350,7 +315,6 @@ apply_hostname() {
 
 enable_services() {
   run_cmd "systemctl enable --now fail2ban"
-  run_cmd "systemctl enable --now crowdsec"
   if has_role web || has_role controller; then
     run_cmd "systemctl enable --now apache2"
   fi
@@ -404,6 +368,7 @@ Profile:       ${PROFILE}
 Roles:         ${ROLES}
 Operator user: ${OPERATOR_USER}
 SSH source:    ${SSH_PUB_SOURCE:-not provided}
+Security:      fail2ban local, CrowdSec remote-managed
 
 ${PROFILE_DESCRIPTION}
 EOF
@@ -422,7 +387,6 @@ main() {
   append_authorized_keys
   ensure_tailscale
   configure_fail2ban
-  configure_crowdsec
   enable_services
   record_host_facts
   print_summary

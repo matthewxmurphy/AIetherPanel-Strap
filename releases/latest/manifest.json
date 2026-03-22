@@ -2,7 +2,7 @@
   "project": "AetherPanel",
   "business_end": "AI Control Host",
   "owner": "Matthew Murphy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "install": {
     "bootstrap": "/aetherpanel/install/bootstrap.sh",
     "installer": "/aetherpanel/install/aetherpanel-install.sh",
@@ -12,8 +12,7 @@
       "/aetherpanel/install/steps/20-packages.sh",
       "/aetherpanel/install/steps/30-tailscale.sh",
       "/aetherpanel/install/steps/40-panel-files.sh",
-      "/aetherpanel/install/steps/50-services.sh",
-      "/aetherpanel/install/steps/60-crowdsec.sh"
+      "/aetherpanel/install/steps/50-services.sh"
     ]
   },
   "ui": {

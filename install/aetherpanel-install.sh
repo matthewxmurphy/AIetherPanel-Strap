@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AETHERPANEL_VERSION="0.1.1"
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+
+AETHERPANEL_VERSION="0.1.2"
 PROFILE="hybrid"
 NODE_NAME="$(hostname -s 2>/dev/null || hostname)"
 ROLES=""
 CONTROLLER_URL="https://my.net30hosting.com"
+CONTROLLER_API_URL="https://my.net30hosting.com/api"
 PUBLIC_HOSTNAME=""
 PANEL_USER="aetherpanel"
 PANEL_GROUP="www-data"
@@ -26,8 +30,15 @@ PHP_FPM_SOCKET=""
 INSTALL_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-https://raw.githubusercontent.com/matthewxmurphy/AetherPanel-Strap/main}"
 AETHERPANEL_SOURCE_DIR=""
 STEP_CACHE_DIR=""
-CROWDSEC_ENROLL_KEY=""
 PROFILE_DESCRIPTION=""
+OPERATOR_USER="mmurphy"
+SSH_PUB_SOURCE=""
+SSH_PUB_URL=""
+TAILSCALE_AUTHKEY=""
+TAILSCALE_ARGS=""
+SET_HOSTNAME="0"
+SSH_SOURCE_CACHE=""
+JOIN_KEY=""
 
 usage() {
   cat <<'EOF'
@@ -37,16 +48,23 @@ Usage:
   aetherpanel-install.sh [options]
 
 Options:
-  --profile hybrid|controller|app|mail-test|dns|backup|custom
+  --profile hybrid|controller|application|app|mail-test|dns|backup|custom
   --node-name NAME
   --roles controller,web,database
   --controller-url URL
+  --controller-api-url URL
+  --join-key KEY
   --public-hostname HOSTNAME
   --panel-port PORT
   --admin-user USER
   --admin-password PASSWORD
+  --operator-user USER
+  --ssh-pub-source /path/to/public-keys.txt
+  --ssh-pub-url URL
+  --tailscale-authkey KEY
+  --tailscale-args "..."
+  --set-hostname
   --install-source-root URL
-  --crowdsec-enroll-key KEY
   --dry-run
   -h, --help
 
@@ -54,8 +72,11 @@ Notes:
   - The local panel is bound to the Tailscale IPv4 by default.
   - Apache stays available for websites. lighttpd is only for the local AetherPanel UI.
   - If MariaDB/Postgres is installed here, that is for websites, not panel state.
-  - Use controller for a dedicated controller node, mail-test for the future testing mail node,
-    and hybrid for the current all-in-one baseline.
+  - Fail2ban is local. CrowdSec is handled remotely and is not installed by this script.
+  - This single script is the normal node bootstrap path.
+  - The separate host-apply script is only for later re-apply/repair.
+  - Use controller for a dedicated controller node, application for a website/application host,
+    mail-test for the future testing mail node, and hybrid for the current all-in-one baseline.
 EOF
 }
 
@@ -100,6 +121,10 @@ parse_args() {
         ROLES="${2:-}"; shift 2 ;;
       --controller-url)
         CONTROLLER_URL="${2:-}"; shift 2 ;;
+      --controller-api-url)
+        CONTROLLER_API_URL="${2:-}"; shift 2 ;;
+      --join-key)
+        JOIN_KEY="${2:-}"; shift 2 ;;
       --public-hostname)
         PUBLIC_HOSTNAME="${2:-}"; shift 2 ;;
       --panel-port)
@@ -108,10 +133,20 @@ parse_args() {
         ADMIN_USER="${2:-}"; shift 2 ;;
       --admin-password)
         ADMIN_PASSWORD="${2:-}"; shift 2 ;;
+      --operator-user)
+        OPERATOR_USER="${2:-}"; shift 2 ;;
+      --ssh-pub-source)
+        SSH_PUB_SOURCE="${2:-}"; shift 2 ;;
+      --ssh-pub-url)
+        SSH_PUB_URL="${2:-}"; shift 2 ;;
+      --tailscale-authkey)
+        TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
+      --tailscale-args)
+        TAILSCALE_ARGS="${2:-}"; shift 2 ;;
+      --set-hostname)
+        SET_HOSTNAME="1"; shift ;;
       --install-source-root)
         INSTALL_SOURCE_ROOT="${2:-}"; shift 2 ;;
-      --crowdsec-enroll-key)
-        CROWDSEC_ENROLL_KEY="${2:-}"; shift 2 ;;
       --dry-run)
         DRY_RUN="1"; shift ;;
       -h|--help)
@@ -132,7 +167,7 @@ apply_profile_defaults() {
       PROFILE_DESCRIPTION="Dedicated controller node with the local panel and fleet/operator baseline."
       [ -n "$ROLES" ] || ROLES="controller"
       ;;
-    app)
+    application|app)
       PROFILE_DESCRIPTION="Website/application node with local site database support."
       [ -n "$ROLES" ] || ROLES="web,database"
       ;;
@@ -160,6 +195,37 @@ apply_profile_defaults() {
 
 has_role() {
   printf ',%s,' "$ROLES" | grep -q ",$1,"
+}
+
+apply_hostname() {
+  if [ "$SET_HOSTNAME" != "1" ]; then
+    return 0
+  fi
+  if [ "$(hostname -s 2>/dev/null || hostname)" = "$NODE_NAME" ]; then
+    return 0
+  fi
+  log "Updating host hostname to ${NODE_NAME}"
+  run_cmd "hostnamectl set-hostname '$NODE_NAME'"
+}
+
+resolve_ssh_pub_source() {
+  if [ -n "$SSH_PUB_SOURCE" ] && [ -n "$SSH_PUB_URL" ]; then
+    fail "Use either --ssh-pub-source or --ssh-pub-url, not both."
+  fi
+
+  if [ -n "$SSH_PUB_SOURCE" ] && [ ! -f "$SSH_PUB_SOURCE" ]; then
+    fail "SSH_PUB_SOURCE does not exist: $SSH_PUB_SOURCE"
+  fi
+
+  if [ -n "$SSH_PUB_URL" ]; then
+    SSH_SOURCE_CACHE="$(mktemp /tmp/aetherpanel-ssh-pubs.XXXXXX)"
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] curl -fsSL %s -o %s\n' "$SSH_PUB_URL" "$SSH_SOURCE_CACHE"
+    else
+      curl -fsSL "$SSH_PUB_URL" -o "$SSH_SOURCE_CACHE"
+    fi
+    SSH_PUB_SOURCE="$SSH_SOURCE_CACHE"
+  fi
 }
 
 detect_tailscale_ip() {
@@ -228,7 +294,6 @@ install_packages() {
     apache2-utils
     ca-certificates
     certbot
-    crowdsec
     curl
     fail2ban
     gnupg
@@ -244,21 +309,65 @@ install_packages() {
     tailscale
   )
 
-  if has_role web || has_role controller; then
+  if has_role web; then
     packages+=(apache2)
   fi
 
   log "Installing host baseline packages"
   run_cmd "apt-get update -y"
   run_cmd "apt-get install -y ca-certificates curl jq gnupg"
+  if command -v debconf-set-selections >/dev/null 2>&1; then
+    printf 'msmtp msmtp/apparmor boolean false\n' >/tmp/aetherpanel-debconf.seed
+    run_cmd "debconf-set-selections /tmp/aetherpanel-debconf.seed"
+  fi
   install_tailscale_repo
   run_cmd "apt-get update -y"
-  run_cmd "apt-get install -y ${packages[*]}"
+  run_cmd "apt-get install -y -o Dpkg::Use-Pty=0 ${packages[*]}"
 }
 
 ensure_user_group() {
   getent group "$PANEL_GROUP" >/dev/null 2>&1 || fail "Required runtime group missing: $PANEL_GROUP"
   id "$PANEL_USER" >/dev/null 2>&1 || run_cmd "useradd --system --gid $PANEL_GROUP --home $PANEL_VAR --shell /usr/sbin/nologin $PANEL_USER"
+}
+
+ensure_operator_user() {
+  if ! id "$OPERATOR_USER" >/dev/null 2>&1; then
+    run_cmd "useradd -m -s /bin/bash '$OPERATOR_USER'"
+  fi
+  run_cmd "usermod -aG sudo '$OPERATOR_USER'"
+  run_cmd "install -d -m 700 -o '$OPERATOR_USER' -g '$OPERATOR_USER' '/home/$OPERATOR_USER/.ssh'"
+  run_cmd "touch '/home/$OPERATOR_USER/.ssh/authorized_keys'"
+  run_cmd "chown '$OPERATOR_USER:$OPERATOR_USER' '/home/$OPERATOR_USER/.ssh/authorized_keys'"
+  run_cmd "chmod 600 '/home/$OPERATOR_USER/.ssh/authorized_keys'"
+  if [ ! -f "/etc/sudoers.d/90-${OPERATOR_USER}" ]; then
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$OPERATOR_USER" >/tmp/aetherpanel-sudoers
+    run_cmd "install -m 0440 /tmp/aetherpanel-sudoers '/etc/sudoers.d/90-${OPERATOR_USER}'"
+  fi
+}
+
+append_authorized_keys() {
+  local target="/home/${OPERATOR_USER}/.ssh/authorized_keys"
+
+  if [ -z "$SSH_PUB_SOURCE" ]; then
+    log "No SSH public key source provided; skipping public key import"
+    return 0
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$line" ] || continue
+    if grep -qxF "$line" "$target"; then
+      continue
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] append key for %s\n' "$OPERATOR_USER"
+    else
+      printf '%s\n' "$line" >>"$target"
+    fi
+  done <"$SSH_PUB_SOURCE"
+
+  run_cmd "chown '$OPERATOR_USER:$OPERATOR_USER' '$target'"
+  run_cmd "chmod 600 '$target'"
 }
 
 ensure_dirs() {
@@ -273,7 +382,9 @@ AETHERPANEL_VERSION=${AETHERPANEL_VERSION}
 PROFILE=${PROFILE}
 NODE_NAME=${NODE_NAME}
 ROLES=${ROLES}
+OPERATOR_USER=${OPERATOR_USER}
 CONTROLLER_URL=${CONTROLLER_URL}
+CONTROLLER_API_URL=${CONTROLLER_API_URL}
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME}
 TAILSCALE_IP=${TAILSCALE_IP}
 PANEL_PORT=${PANEL_PORT}
@@ -283,6 +394,20 @@ PANEL_VAR=${PANEL_VAR}
 PANEL_LOG=${PANEL_LOG}
 EOF
   run_cmd "install -m 0640 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-node.env $PANEL_ETC/node.env"
+}
+
+write_join_seed() {
+  cat <<EOF >/tmp/aetherpanel-join.json
+{
+  "controller_url": "${CONTROLLER_URL}",
+  "controller_api_url": "${CONTROLLER_API_URL}",
+  "join_mode": "$([ -n "$JOIN_KEY" ] && printf 'join' || printf 'bootstrap')",
+  "join_key_present": $([ -n "$JOIN_KEY" ] && printf 'true' || printf 'false'),
+  "profile": "${PROFILE}",
+  "roles": "$(printf '%s' "$ROLES")"
+}
+EOF
+  run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-join.json $PANEL_VAR/state/join.json"
 }
 
 write_branding_seed() {
@@ -492,6 +617,15 @@ EOF
 }
 
 write_basic_auth() {
+  local auth_file="${PANEL_ETC}/users.htpasswd"
+
+  if [ -f "$auth_file" ] && grep -q "^${ADMIN_USER}:" "$auth_file" && [ -z "$ADMIN_PASSWORD" ]; then
+    ADMIN_PASSWORD="<unchanged>"
+    chown "$PANEL_USER:$PANEL_GROUP" "$auth_file" || true
+    chmod 0660 "$auth_file" || true
+    return 0
+  fi
+
   if [ -z "$ADMIN_PASSWORD" ]; then
     ADMIN_PASSWORD="$(openssl rand -base64 18 | tr -d '\n' | cut -c1-24)"
   fi
@@ -499,9 +633,13 @@ write_basic_auth() {
     printf '[dry-run] htpasswd -iBc %s/users.htpasswd %s\n' "$PANEL_ETC" "$ADMIN_USER"
     return 0
   fi
-  printf '%s\n' "$ADMIN_PASSWORD" | htpasswd -iBc "$PANEL_ETC/users.htpasswd" "$ADMIN_USER"
-  chown "$PANEL_USER:$PANEL_GROUP" "$PANEL_ETC/users.htpasswd"
-  chmod 0660 "$PANEL_ETC/users.htpasswd"
+  if [ -f "$auth_file" ]; then
+    printf '%s\n' "$ADMIN_PASSWORD" | htpasswd -iB "$auth_file" "$ADMIN_USER"
+  else
+    printf '%s\n' "$ADMIN_PASSWORD" | htpasswd -iBc "$auth_file" "$ADMIN_USER"
+  fi
+  chown "$PANEL_USER:$PANEL_GROUP" "$auth_file"
+  chmod 0660 "$auth_file"
 }
 
 detect_php_fpm_socket() {
@@ -532,8 +670,14 @@ ensure_tailscale_connected() {
     return 0
   fi
 
+  if [ -n "$TAILSCALE_AUTHKEY" ]; then
+    log "Bringing node onto the tailnet with auth key"
+    run_cmd "tailscale up --authkey '$TAILSCALE_AUTHKEY' $TAILSCALE_ARGS"
+    return 0
+  fi
+
   log "Launching Tailscale sign-in or sign-up flow"
-  run_cmd "tailscale up"
+  run_cmd "tailscale up $TAILSCALE_ARGS"
 }
 
 configure_fail2ban() {
@@ -546,7 +690,7 @@ bantime = 1h
 findtime = 10m
 EOF
 
-  if has_role web || has_role controller; then
+  if has_role web; then
     cat <<'EOF' >>/tmp/aetherpanel-fail2ban.local
 
 [apache-auth]
@@ -565,41 +709,6 @@ EOF
 
   run_cmd "install -d -m 0755 /etc/fail2ban/jail.d"
   run_cmd "install -m 0644 /tmp/aetherpanel-fail2ban.local /etc/fail2ban/jail.d/aetherpanel.local"
-}
-
-configure_crowdsec_local() {
-  run_cmd "install -d -m 0755 /etc/crowdsec/acquis.d"
-
-  cat <<EOF >/tmp/aetherpanel-crowdsec.yaml
-filenames:
-  - /var/log/auth.log
-labels:
-  type: syslog
-EOF
-
-  if has_role web || has_role controller; then
-    cat <<'EOF' >>/tmp/aetherpanel-crowdsec.yaml
----
-filenames:
-  - /var/log/apache2/access.log
-labels:
-  type: apache2
----
-filenames:
-  - /var/log/apache2/error.log
-labels:
-  type: apache2
-EOF
-  fi
-
-  run_cmd "install -m 0644 /tmp/aetherpanel-crowdsec.yaml /etc/crowdsec/acquis.d/aetherpanel.yaml"
-
-  if command -v cscli >/dev/null 2>&1; then
-    run_cmd "cscli collections install crowdsecurity/sshd || true"
-    if has_role web || has_role controller; then
-      run_cmd "cscli collections install crowdsecurity/apache2 || true"
-    fi
-  fi
 }
 
 sync_ui_tree() {
@@ -625,18 +734,69 @@ write_lighttpd_config() {
     -e "s|__PHP_FPM_SOCKET__|$PHP_FPM_SOCKET|g" \
     "$LIGHTTPD_TEMPLATE" >/tmp/aetherpanel-lighttpd.conf
   run_cmd "install -m 0644 /tmp/aetherpanel-lighttpd.conf /etc/lighttpd/conf-available/50-aetherpanel.conf"
-  run_cmd "lighty-enable-mod auth authn_file setenv accesslog fastcgi"
+  run_cmd "lighty-enable-mod auth setenv accesslog fastcgi"
   run_cmd "ln -sf ../conf-available/50-aetherpanel.conf /etc/lighttpd/conf-enabled/50-aetherpanel.conf"
   run_cmd "lighttpd -tt -f /etc/lighttpd/lighttpd.conf"
 }
 
+enable_apache_php_baseline() {
+  local php_apache_conf=""
+
+  if ! has_role web; then
+    return 0
+  fi
+
+  php_apache_conf="$(find /etc/apache2/conf-available -maxdepth 1 -name 'php*-fpm.conf' 2>/dev/null | xargs -n1 basename 2>/dev/null | head -n1 | sed 's/\.conf$//' || true)"
+
+  run_cmd "a2enmod proxy_fcgi setenvif ssl rewrite"
+  if [ -n "$php_apache_conf" ]; then
+    run_cmd "a2enconf '$php_apache_conf'"
+  fi
+  run_cmd "apache2ctl configtest"
+}
+
 enable_services() {
   run_cmd "systemctl enable --now lighttpd"
-  if has_role web || has_role controller; then
+  if has_role web; then
+    enable_apache_php_baseline
     run_cmd "systemctl enable --now apache2"
   fi
   run_cmd "systemctl enable --now fail2ban"
-  run_cmd "systemctl enable --now crowdsec"
+}
+
+record_host_facts() {
+  local tailscale_ip=""
+  local public_ipv4=""
+  local private_ipv4=""
+  local public_ipv6=""
+  local private_ipv6=""
+
+  tailscale_ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+  public_ipv4="$(curl -4fsSL --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  private_ipv4="$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)"
+  public_ipv6="$(curl -6fsSL --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  private_ipv6="$(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
+
+  cat <<EOF >/tmp/aetherpanel-host-facts.json
+{
+  "node_name": "${NODE_NAME}",
+  "profile": "${PROFILE}",
+  "roles": "$(printf '%s' "$ROLES")",
+  "operator_user": "${OPERATOR_USER}",
+  "tailscale_ipv4": "${tailscale_ip}",
+  "public_ipv4": "${public_ipv4}",
+  "private_ipv4": "${private_ipv4}",
+  "public_ipv6": "${public_ipv6}",
+  "private_ipv6": "${private_ipv6}"
+}
+EOF
+  run_cmd "install -m 0660 -o $PANEL_USER -g $PANEL_GROUP /tmp/aetherpanel-host-facts.json '$PANEL_VAR/state/host-facts.json'"
+}
+
+cleanup() {
+  if [ -n "$SSH_SOURCE_CACHE" ] && [ -f "$SSH_SOURCE_CACHE" ]; then
+    rm -f "$SSH_SOURCE_CACHE"
+  fi
 }
 
 source_step_script() {
@@ -662,21 +822,6 @@ load_step_scripts() {
   source_step_script "30-tailscale.sh"
   source_step_script "40-panel-files.sh"
   source_step_script "50-services.sh"
-  source_step_script "60-crowdsec.sh"
-}
-
-enroll_crowdsec_console() {
-  if [ -z "$CROWDSEC_ENROLL_KEY" ]; then
-    return 0
-  fi
-
-  if ! command -v cscli >/dev/null 2>&1; then
-    fail "CrowdSec CLI is missing; cannot enroll in CrowdSec Console."
-  fi
-
-  log "Enrolling this engine in CrowdSec Console"
-  run_cmd "cscli console enroll --name '$NODE_NAME' '$CROWDSEC_ENROLL_KEY'"
-  log "CrowdSec engine enrollment sent. Accept it in app.crowdsec.net, then restart crowdsec if needed."
 }
 
 print_summary() {
@@ -689,6 +834,8 @@ Profile:       ${PROFILE}
 Roles:         ${ROLES}
 Tailnet bind:  http://${TAILSCALE_IP}:${PANEL_PORT}
 Controller:    ${CONTROLLER_URL}
+Controller API:${CONTROLLER_API_URL}
+Join mode:     $([ -n "$JOIN_KEY" ] && printf 'join' || printf 'bootstrap')
 Admin user:    ${ADMIN_USER}
 Admin pass:    ${ADMIN_PASSWORD}
 
@@ -698,7 +845,8 @@ Node config:   ${PANEL_ETC}/node.env
 
 Remember:
 - lighttpd is for the local AetherPanel UI
-- Apache only installs when the profile carries the web or controller role
+- Apache only installs when the profile carries the web role
+- Fail2ban is local. CrowdSec stays remote-managed.
 - host MariaDB/Postgres is for websites, not panel state
 
 ${PROFILE_DESCRIPTION}
@@ -706,6 +854,7 @@ EOF
 }
 
 main() {
+  trap cleanup EXIT
   parse_args "$@"
   apply_profile_defaults
   load_step_scripts
@@ -714,7 +863,6 @@ main() {
   aetherpanel_step_tailscale
   aetherpanel_step_panel_files
   aetherpanel_step_services
-  aetherpanel_step_crowdsec
   print_summary
 }
 
