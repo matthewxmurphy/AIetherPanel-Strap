@@ -11,7 +11,7 @@ if (!is_string($requestPath) || $requestPath === '') {
 $serverPort = trim((string)($_SERVER['SERVER_PORT'] ?? ''));
 $scriptPath = $requestPath !== '' ? $requestPath : ($scriptName !== '' ? $scriptName : '/');
 $assetBase = trim((string)($_SERVER['AETHERPANEL_ASSET_PREFIX'] ?? ''));
-if ($serverPort === '8844') {
+if (($serverPort === '80' || $serverPort === '443') && ($scriptName === '/index.php' || $scriptName === 'index.php')) {
     $scriptPath = '/';
     $assetBase = '';
 } elseif ($assetBase === '') {

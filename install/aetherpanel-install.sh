@@ -13,7 +13,7 @@ CONTROLLER_API_URL=""
 PUBLIC_HOSTNAME=""
 PANEL_USER="aetherpanel"
 PANEL_GROUP="www-data"
-PANEL_PORT="8844"
+PANEL_PORT="80"
 PANEL_ROOT="/opt/aetherpanel"
 PANEL_ETC="/etc/aetherpanel"
 PANEL_VAR="/var/lib/aetherpanel"
@@ -1046,11 +1046,20 @@ print_summary() {
   local controller_label="${CONTROLLER_URL:-Pending until the control API is ready}"
   local controller_api_label="${CONTROLLER_API_URL:-Pending until the control API is ready}"
   local join_mode_label="pending-license"
+  local panel_bind_label=""
 
   if [ -n "$JOIN_KEY" ]; then
     join_mode_label="join"
   elif [ -n "$CONTROLLER_URL" ] || [ -n "$CONTROLLER_API_URL" ]; then
     join_mode_label="controller-known"
+  fi
+
+  if [ "$PANEL_PORT" = "80" ]; then
+    panel_bind_label="http://${TAILSCALE_IP}"
+  elif [ "$PANEL_PORT" = "443" ]; then
+    panel_bind_label="https://${TAILSCALE_IP}"
+  else
+    panel_bind_label="http://${TAILSCALE_IP}:${PANEL_PORT}"
   fi
 
   cat <<EOF
@@ -1060,7 +1069,7 @@ AIetherPanel bootstrap complete.
 Node:          ${NODE_NAME}
 Profile:       ${PROFILE}
 Roles:         ${ROLES}
-Tailnet bind:  http://${TAILSCALE_IP}:${PANEL_PORT}
+Tailnet bind:  ${panel_bind_label}
 Controller:    ${controller_label}
 Controller API:${controller_api_label}
 Join mode:     ${join_mode_label}

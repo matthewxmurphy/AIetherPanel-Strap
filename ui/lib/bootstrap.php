@@ -307,7 +307,7 @@ function aetherpanel_node_context(): array
         'join_key_present' => trim((string)($env['JOIN_KEY'] ?? '')) !== '',
         'public_hostname' => $env['PUBLIC_HOSTNAME'] ?? '',
         'tailscale_ip' => $env['TAILSCALE_IP'] ?? '',
-        'panel_port' => $env['PANEL_PORT'] ?? '8844',
+        'panel_port' => $env['PANEL_PORT'] ?? '80',
         'version' => $env['AETHERPANEL_VERSION'] ?? '0.1.0',
     ];
 }
@@ -775,9 +775,15 @@ function aetherpanel_control_db_env_snippet(array $config): string
 function aetherpanel_login_endpoint(array $node): string
 {
     $ip = trim((string)($node['tailscale_ip'] ?? ''));
-    $port = trim((string)($node['panel_port'] ?? '8844'));
+    $port = trim((string)($node['panel_port'] ?? '80'));
     if ($ip === '') {
         return 'Tailscale bind pending';
+    }
+    if ($port === '' || $port === '80') {
+        return sprintf('http://%s', $ip);
+    }
+    if ($port === '443') {
+        return sprintf('https://%s', $ip);
     }
     return sprintf('http://%s:%s', $ip, $port);
 }
