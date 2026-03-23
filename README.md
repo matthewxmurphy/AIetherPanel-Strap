@@ -1,6 +1,12 @@
 # AIetherPanel-Strap
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![GitHub Repo Size](https://img.shields.io/github/repo-size/matthewxmurphy/AIetherPanel-Strap)
+![GitHub Last Commit](https://img.shields.io/github/last-commit/matthewxmurphy/AIetherPanel-Strap)
+
 Public bootstrap installer for AIetherPanel by Matthew Murphy.
+
+![AIetherPanel Logo](logo.png)
 
 This repo is the small public install surface for AI Control Host and Net30 Hosting. It contains only the files needed to bootstrap the per-server AIetherPanel host baseline:
 
