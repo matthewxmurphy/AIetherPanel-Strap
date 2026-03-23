@@ -1,4 +1,4 @@
-# AetherPanel-Strap
+# AIetherPanel-Strap
 
 Public bootstrap installer for AIetherPanel by Matthew Murphy.
 
@@ -31,7 +31,7 @@ Security baseline:
 First bootstrap from a fresh node:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AetherPanel-Strap/main/install/bootstrap.sh | sudo bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main/install/bootstrap.sh | sudo bash -s -- \
   --profile hybrid \
   --admin-user mmurphy
 ```
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AetherPanel-Strap/ma
 Repair or re-apply the shared host baseline later if needed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AetherPanel-Strap/main/install/aetherpanel-host-apply.sh | sudo bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main/install/aetherpanel-host-apply.sh | sudo bash -s -- \
   --profile hybrid \
   --operator-user mmurphy
 ```
