@@ -395,6 +395,7 @@ install_packages() {
     php-cli
     php-curl
     php-fpm
+    php-intl
     php-sqlite3
     php-mbstring
     php-xml
