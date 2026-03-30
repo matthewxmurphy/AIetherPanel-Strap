@@ -138,7 +138,7 @@ main() {
   fi
 
   log "Downloading installer"
-  curl -fsSL "${INSTALL_SOURCE_ROOT%/}/install/aetherpanel-install.sh" -o "${INSTALLER_PATH}"
+  curl -fsSL "${INSTALL_SOURCE_ROOT%/}/install/aietherpanel-install.sh" -o "${INSTALLER_PATH}"
   chmod +x "${INSTALLER_PATH}"
 
   log "Running installer"
