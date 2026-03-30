@@ -27,6 +27,24 @@ cleanup() {
   rm -rf "${TMP_DIR}"
 }
 
+restart_ssh_service() {
+  local service_name=""
+
+  for candidate in ssh sshd; do
+    if systemctl list-unit-files "${candidate}.service" --no-legend >/dev/null 2>&1; then
+      service_name="${candidate}"
+      break
+    fi
+  done
+
+  if [ -z "${service_name}" ]; then
+    fail "Unable to determine SSH service name for restart."
+  fi
+
+  log "Restarting SSH service (${service_name})"
+  systemctl restart "${service_name}.service"
+}
+
 update_packages() {
   log "Updating package lists"
   apt-get update -y
@@ -61,8 +79,7 @@ harden_ssh() {
     mv "$sshd_config_new" "$sshd_config"
     chmod 644 "$sshd_config"
 
-    log "Restarting SSH service"
-    systemctl restart sshd
+    restart_ssh_service
   else
     rm -f "$sshd_config_new"
   fi
