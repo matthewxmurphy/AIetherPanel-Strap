@@ -9,6 +9,7 @@ TMP_DIR="$(mktemp -d /tmp/aetherpanel-bootstrap.XXXXXX)"
 INSTALLER_PATH="${TMP_DIR}/aetherpanel-install.sh"
 RUN_STAGE_TWO="0"
 PASSTHROUGH_ARGS=()
+FLEET_SSH_PUB_URL="${AIETHERPANEL_FLEET_SSH_PUB_URL:-}"
 
 log() {
   printf '[bootstrap] %s\n' "$*"
@@ -31,6 +32,11 @@ parse_args() {
         RUN_STAGE_TWO="1"
         shift
         ;;
+      --fleet-ssh-pub-url)
+        [ $# -ge 2 ] || fail "--fleet-ssh-pub-url requires a value."
+        FLEET_SSH_PUB_URL="${2:-}"
+        shift 2
+        ;;
       -h|--help)
         cat <<'EOF'
 AIetherPanel bootstrap
@@ -41,6 +47,7 @@ Usage:
 Bootstrap options:
   --stage-two-source-root URL   Source root used to download stage-two installer assets
   --run-stage-two               Run the stage-two installer after bootstrap prep
+  --fleet-ssh-pub-url URL       Public key list for controller/operator SSH access on joined nodes
 
 All other arguments are passed through to aetherpanel-install.sh.
 EOF
@@ -58,6 +65,29 @@ require_root() {
   if [ "$(id -u)" -ne 0 ]; then
     fail "Run this bootstrap as root."
   fi
+}
+
+stage_two_has_ssh_pub_arg() {
+  local arg=""
+
+  for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    case "$arg" in
+      --ssh-pub-source|--ssh-pub-url)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+effective_fleet_ssh_pub_url() {
+  if [ -n "${FLEET_SSH_PUB_URL}" ]; then
+    printf '%s\n' "${FLEET_SSH_PUB_URL}"
+    return 0
+  fi
+
+  printf '%s/install/fleet-authorized_keys.txt\n' "${INSTALL_SOURCE_ROOT%/}"
 }
 
 cleanup() {
@@ -140,6 +170,10 @@ main() {
   log "Downloading installer"
   curl -fsSL "${INSTALL_SOURCE_ROOT%/}/install/aietherpanel-install.sh" -o "${INSTALLER_PATH}"
   chmod +x "${INSTALLER_PATH}"
+
+  if ! stage_two_has_ssh_pub_arg; then
+    PASSTHROUGH_ARGS+=("--ssh-pub-url" "$(effective_fleet_ssh_pub_url)")
+  fi
 
   log "Running installer"
   exec bash "${INSTALLER_PATH}" "${PASSTHROUGH_ARGS[@]}"
