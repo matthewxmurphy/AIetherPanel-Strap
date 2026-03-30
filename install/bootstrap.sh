@@ -49,10 +49,11 @@ harden_ssh() {
     fail "SSH config not found at $sshd_config"
   fi
 
-  sed -E 's/^#?PermitRootLogin.*/PermitRootLogin no/' \
-      -E 's/^#?PasswordAuthentication.*/PasswordAuthentication no/' \
-      -E 's/^#?PermitEmptyPasswords.*/PermitEmptyPasswords no/' \
-      -E 's/^#?PubkeyAuthentication.*/PubkeyAuthentication yes/' \
+  sed -E \
+      -e 's/^#?PermitRootLogin.*/PermitRootLogin no/' \
+      -e 's/^#?PasswordAuthentication.*/PasswordAuthentication no/' \
+      -e 's/^#?PermitEmptyPasswords.*/PermitEmptyPasswords no/' \
+      -e 's/^#?PubkeyAuthentication.*/PubkeyAuthentication yes/' \
       "$sshd_config" > "$sshd_config_new"
 
   if ! diff -q "$sshd_config" "$sshd_config_new" >/dev/null 2>&1; then
