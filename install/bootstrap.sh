@@ -111,6 +111,12 @@ cleanup() {
   rm -rf "${TMP_DIR}"
 }
 
+default_fleet_authorized_keys() {
+  cat <<'EOF'
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEoGV7fX95o5NlUOc/gxLaoj/j/3bqcSAvGwWZRHudvU aietherpanel@t0001
+EOF
+}
+
 restart_ssh_service() {
   local service_name=""
 
@@ -192,7 +198,10 @@ resolve_ssh_pub_source() {
   fi
 
   SSH_SOURCE_CACHE="$(mktemp /tmp/aetherpanel-ssh-pubs.XXXXXX)"
-  curl -fsSL "${FLEET_SSH_PUB_URL}" -o "${SSH_SOURCE_CACHE}"
+  if ! curl -fsSL "${FLEET_SSH_PUB_URL}" -o "${SSH_SOURCE_CACHE}"; then
+    log "Falling back to bundled fleet operator key"
+    default_fleet_authorized_keys >"${SSH_SOURCE_CACHE}"
+  fi
 }
 
 append_authorized_keys() {
