@@ -7,6 +7,8 @@ export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
 INSTALL_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main}"
 TMP_DIR="$(mktemp -d /tmp/aetherpanel-bootstrap.XXXXXX)"
 INSTALLER_PATH="${TMP_DIR}/aetherpanel-install.sh"
+RUN_STAGE_TWO="0"
+PASSTHROUGH_ARGS=()
 
 log() {
   printf '[bootstrap] %s\n' "$*"
@@ -15,6 +17,41 @@ log() {
 fail() {
   printf '[bootstrap] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --stage-two-source-root)
+        [ $# -ge 2 ] || fail "--stage-two-source-root requires a value."
+        INSTALL_SOURCE_ROOT="${2:-}"
+        shift 2
+        ;;
+      --run-stage-two)
+        RUN_STAGE_TWO="1"
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF'
+AIetherPanel bootstrap
+
+Usage:
+  bootstrap.sh [bootstrap-options] [installer-options]
+
+Bootstrap options:
+  --stage-two-source-root URL   Source root used to download stage-two installer assets
+  --run-stage-two               Run the stage-two installer after bootstrap prep
+
+All other arguments are passed through to aetherpanel-install.sh.
+EOF
+        exit 0
+        ;;
+      *)
+        PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
 }
 
 require_root() {
@@ -86,18 +123,26 @@ harden_ssh() {
 }
 
 main() {
+  parse_args "$@"
   require_root
   update_packages
   harden_ssh
 
   trap cleanup EXIT
 
+  export AETHERPANEL_INSTALL_SOURCE_ROOT="${INSTALL_SOURCE_ROOT}"
+
+  if [ "${RUN_STAGE_TWO}" != "1" ]; then
+    log "Bootstrap prep complete. Skipping installer because --run-stage-two was not provided."
+    exit 0
+  fi
+
   log "Downloading installer"
   curl -fsSL "${INSTALL_SOURCE_ROOT%/}/install/aetherpanel-install.sh" -o "${INSTALLER_PATH}"
   chmod +x "${INSTALLER_PATH}"
 
   log "Running installer"
-  exec bash "${INSTALLER_PATH}" "$@"
+  exec bash "${INSTALLER_PATH}" "${PASSTHROUGH_ARGS[@]}"
 }
 
 main "$@"
