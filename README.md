@@ -34,18 +34,33 @@ Security baseline:
 - `fail2ban` installs locally on the node
 - `CrowdSec` is handled remotely and is not installed by the node bootstrap
 
-First bootstrap from a fresh node:
+## Installation status and trusted entrypoint
+
+Full stage-two installation is currently blocked: the audited source lacks the
+required service template and controller archive. The integrity barrier requires
+reviewed payloads and trusted digests and fails before host preparation without
+them. Obtain the bootstrap itself through a trusted, reviewed source before
+running it as root; the barrier cannot authenticate its own initial download.
+Mutable-main download-and-execute recipes are not a trusted entrypoint.
+
+See [the bounded integrity contract](docs/bootstrap-stage-two-integrity.md) for
+exact missing inputs, custom mirrors, coverage limits, and the two-step flow when
+a mirror requires Tailscale bring-up first. No full installation has been qualified.
+
+After obtaining and reviewing a local copy, existing **prep-only** mode is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main/install/bootstrap.sh | sudo bash -s -- \
-  --profile hybrid \
-  --admin-user mmurphy
+sudo bash ./install/bootstrap.sh --profile hybrid --admin-user mmurphy
 ```
 
-Repair or re-apply the shared host baseline later if needed:
+This command changes the host baseline, including Tailscale, operator access,
+package repositories and SSH configuration. It does not run stage two. Only
+proceed to `--run-stage-two` after completing the trusted payload requirements
+in the linked contract.
+
+The repair/re-apply helper is outside this bounded stage-two integrity barrier.
+Obtain and review a local copy before separately choosing to run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main/install/aetherpanel-host-apply.sh | sudo bash -s -- \
-  --profile hybrid \
-  --operator-user mmurphy
+sudo bash ./install/aetherpanel-host-apply.sh --profile hybrid --operator-user mmurphy
 ```
