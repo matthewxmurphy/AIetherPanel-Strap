@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -69,7 +70,9 @@ sys.exit(int(os.environ.get("RUNNER_EXIT", "0")))
 HARNESS = r'''
 source "$BOOTSTRAP_PATH"
 require_root() { :; }
-record_prep() { printf '%s\n' "$1" >> "$PREP_LOG"; }
+record_prep() { printf '%s\n' "$1" >> "$PREP_LOG"; printf 'prep:%s\n' "$1" >> "$PHASE_LOG"; }
+bootstrap_os_id() { printf 'os\n' >> "$PHASE_LOG"; [ -f "$TEST_OS_RELEASE" ] && parse_os_release_id <"$TEST_OS_RELEASE"; }
+bootstrap_command_available() { printf 'tool:%s\n' "$1" >> "$PHASE_LOG"; [ "$1" != "${TEST_MISSING_TOOL:-}" ]; }
 install_tailscale() { record_prep install_tailscale; }
 ensure_operator_user() { record_prep ensure_operator_user; }
 resolve_ssh_pub_source() { record_prep resolve_ssh_pub_source; }
@@ -77,8 +80,8 @@ append_authorized_keys() { record_prep append_authorized_keys; }
 ensure_tailscale_connected() { record_prep ensure_tailscale_connected; }
 ensure_aietherpanel_apt_repo() { record_prep ensure_aietherpanel_apt_repo; }
 harden_ssh() { record_prep harden_ssh; }
-curl() { "$TEST_PYTHON" "$DOWNLOAD_STUB" "$@"; }
-bash() { "$TEST_PYTHON" "$RUNNER_STUB" "$@"; }
+curl() { printf 'download\n' >> "$PHASE_LOG"; "$TEST_PYTHON" -I -S -B "$DOWNLOAD_STUB" "$@"; }
+bash() { printf 'runner\n' >> "$PHASE_LOG"; "$TEST_PYTHON" -I -S -B "$RUNNER_STUB" "$@"; }
 main "$@"
 '''
 
@@ -103,15 +106,22 @@ class BootstrapIntegrity(unittest.TestCase):
             destination.write_bytes(data)
         (self.root / "download.py").write_text(FAKE_DOWNLOAD)
         (self.root / "runner.py").write_text(FAKE_RUNNER)
-        self.env = dict(os.environ)
-        for key in tuple(self.env):
-            if key.startswith(("AIETHERPANEL_", "AETHERPANEL_")):
-                del self.env[key]
+        if not (sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode):
+            self.fail("Use the reviewed isolated outer launcher; no ambient Python startup")
+        if os.getuid() == 0:
+            self.fail("Offline fixtures must run as an unprivileged user")
+        self.bash = os.environ["BOOTSTRAP_TEST_BASH"]
+        if digest(Path(self.bash).read_bytes()) != os.environ["BOOTSTRAP_TEST_BASH_SHA256"]:
+            self.fail("Bash executable differs from the qualified digest")
+        self.env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "LANG")}
+        (self.root / "os-release").write_text('ID="ubuntu"\n')
         self.env.update({
             "BOOTSTRAP_PATH": str(BOOTSTRAP),
             "FIXTURE_ROOT": str(self.fixtures),
             "FAKE_SOURCE_ROOT": PINNED,
-            "TEST_PYTHON": shutil.which("python3"),
+            "TEST_PYTHON": sys.executable,
+            "TEST_OS_RELEASE": str(self.root / "os-release"),
+            "PHASE_LOG": str(self.root / "phases.txt"),
             "DOWNLOAD_STUB": str(self.root / "download.py"),
             "RUNNER_STUB": str(self.root / "runner.py"),
             "REQUEST_LOG": str(self.root / "requests.jsonl"),
@@ -127,7 +137,7 @@ class BootstrapIntegrity(unittest.TestCase):
     def run_bootstrap(self, args, extra_env=None):
         env = dict(self.env)
         env.update(extra_env or {})
-        return subprocess.run(["/bin/bash", "-c", HARNESS, "offline-bootstrap", *args],
+        return subprocess.run([self.bash, "--noprofile", "--norc", "-c", HARNESS, "offline-bootstrap", *args],
                               env=env, text=True, capture_output=True, timeout=20)
 
     def records(self, name):
@@ -145,6 +155,52 @@ class BootstrapIntegrity(unittest.TestCase):
             temporary_root = next(parent for parent in partial.parents
                                   if parent.name.startswith("aetherpanel-bootstrap."))
             self.assertFalse(temporary_root.exists(), "staged tree was not cleaned up")
+
+    def test_unsupported_or_ambiguous_os_rejects_both_modes_before_any_effect(self):
+        metadata = ['ID=debian\n', 'ID_LIKE=ubuntu\n', '', 'ID=ubuntu\nID=debian\n',
+                    'ID=ubuntu\nID=ubuntu\n', 'ID="ubuntu\n', 'ID=\n',
+                    f'ID=$(touch {self.root / "must-not-execute"})\n']
+        for value in metadata:
+            for args in ([], self.complete):
+                with self.subTest(value=value, stage_two=bool(args)):
+                    (self.root / "os-release").write_text(value)
+                    result = self.run_bootstrap(args)
+                    self.assert_rejected_before_prep(result)
+                    self.assertEqual(self.records("requests.jsonl"), [])
+                    self.assertFalse((self.root / "must-not-execute").exists())
+
+    def test_missing_os_metadata_rejects_both_modes_before_any_effect(self):
+        (self.root / "os-release").unlink()
+        for args in ([], self.complete):
+            self.assert_rejected_before_prep(self.run_bootstrap(args))
+        self.assertEqual(self.records("requests.jsonl"), [])
+
+    def test_quoted_ubuntu_id_is_parsed_as_data_and_preflight_precedes_effects(self):
+        for value in ['ID=ubuntu\n', 'ID="ubuntu"\n', "ID='ubuntu'\n"]:
+            with self.subTest(value=value):
+                (self.root / "os-release").write_text(value)
+                result = self.run_bootstrap(self.complete)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                phases = (self.root / "phases.txt").read_text().splitlines()
+                first_effect = next(n for n, phase in enumerate(phases) if phase == "download")
+                self.assertEqual(phases[0], "os")
+                self.assertTrue(all(phase.startswith("tool:") for phase in phases[1:first_effect]))
+                self.assertIn("tool:sha256sum", phases[:first_effect])
+                self.assertIn("tool:apt-get", phases[:first_effect])
+                self.assertLess(first_effect, next(n for n, phase in enumerate(phases) if phase.startswith("prep:")))
+                self.assertEqual(phases[-1], "runner")
+                for name in ['phases.txt', 'prep.txt', 'requests.jsonl', 'runner.jsonl']:
+                    (self.root / name).unlink()
+
+    def test_each_missing_required_tool_rejects_before_download_or_preparation(self):
+        common = 'id apt-get systemctl useradd usermod install touch chown chmod mktemp curl sed grep head diff mv date rm cat'.split()
+        for args, tools in (([], common), (self.complete, common + ['sha256sum', 'mkdir', 'dirname', 'bash'])):
+            for tool in tools:
+                with self.subTest(stage_two=bool(args), tool=tool):
+                    result = self.run_bootstrap(args, {"TEST_MISSING_TOOL": tool})
+                    self.assert_rejected_before_prep(result)
+                    self.assertIn('command unavailable: ' + tool, result.stderr)
+                    self.assertEqual(self.records("requests.jsonl"), [])
 
     def test_prep_only_preserves_existing_flow_without_stage_two_downloads(self):
         result = self.run_bootstrap([])

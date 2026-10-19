@@ -47,6 +47,12 @@ See [the bounded integrity contract](docs/bootstrap-stage-two-integrity.md) for
 exact missing inputs, custom mirrors, coverage limits, and the two-step flow when
 a mirror requires Tailscale bring-up first. No full installation has been qualified.
 
+Both modes now reject non-Ubuntu/missing or ambiguous OS identity and missing
+required commands before any download or host preparation. Bash4+ is required.
+This is source admission, not qualification of a particular Ubuntu release.
+See the linked guide for reviewed isolated offline tests; never execute fixtures
+with inherited shell/Python environment or treat stub payloads as installable.
+
 After obtaining and reviewing a local copy, existing **prep-only** mode is:
 
 ```bash

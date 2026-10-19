@@ -7,6 +7,24 @@ Start with a bootstrap script obtained through a trusted, reviewed channel;
 a `curl .../main/install/bootstrap.sh | sudo bash` command does not authenticate
 that initial bootstrap script. No historical release files or versions change.
 
+## Pre-mutation OS and tool admission
+
+Before downloads or either mode's seven host-preparation helpers, bootstrap now
+requires Bash4 or later, a readable/unambiguous exact Ubuntu `ID` in fixed
+`/etc/os-release`, and its existing required commands. OS-ID admission reads the
+metadata as data, not shell. The existing later Tailscale helper still sources
+`/etc/os-release` for its repository codename, unchanged; this correction does
+not qualify that helper/vendor chain. There is no caller-supplied admission
+OS-file override. ID_LIKE alone,
+duplicate/missing/malformed/non-Ubuntu ID and missing tools stop before host
+preparation. Stage-two mode additionally requires sha256sum and staging utilities;
+those dependencies are not installed after partial account/SSH changes.
+
+This matches the existing Ubuntu-only source contract; it does not qualify any
+Ubuntu release/version, kernel, architecture, package source or native install.
+Tailscale itself can still be installed by its existing helper after admission.
+SSH/operator policy and the pinned stage-two installer/helper bytes are unchanged.
+
 ## What the bootstrap verifies
 
 The default stage-two source is the full immutable source commit
@@ -92,17 +110,44 @@ must not be embedded in the source URL.
 
 ## Offline verification and coverage limit
 
-```bash
-bash -n install/bootstrap.sh
-python3 -m unittest discover -s tests -p 'test_bootstrap_integrity.py' -v
+The17-method fixture requires the reviewed isolated launcher, a reviewed cached
+immutable Linux image with qualified Bash>=4/Python/utilities, a local user-owned
+Docker Unix socket and an unprivileged operator. It never pulls or starts a daemon.
+Review exact source and launcher before first execution. Use fresh private artifact
+directories outside source; do not substitute a production endpoint. First obtain
+version/hash metadata only, with no source mount or tests:
+
+```sh
+# Explicit reviewed local dependencies/paths, not mutable defaults.
+/usr/bin/env -i PATH=/usr/bin:/bin /absolute/qualified/python -I -S -B tests/run_bootstrap_offline.py \
+  --docker /absolute/qualified/docker --socket unix:///approved/local/socket \
+  --image sha256:<reviewed-cached-image-id> \
+  --evidence-dir /new/private/qualification --qualify
+# After independent review of receipt.json and the frozen source tree:
+/usr/bin/env -i PATH=/usr/bin:/bin /absolute/qualified/python -I -S -B tests/run_bootstrap_offline.py \
+  --docker /absolute/qualified/docker --socket unix:///approved/local/socket \
+  --image sha256:<same-image-id> --qualification /private/qualification/receipt.json \
+  --tree <reviewed-git-index-tree> --expect-tests 17 --evidence-dir /new/private/offline-run
 ```
+
+The placeholders deliberately do not execute as a working release recipe.
+Source exports are ten explicit index paths, mounted read-only without a writable
+alias. Only new owned home/tmp/sentinels are writable. The container is nonroot,
+network-none, read-only-root, capability-free with no privilege escalation; there
+is no host home/socket/project mount. Host and child environments are sanitized;
+Python runs isolated without site/bytecode and Bash has no startup files. Denial
+sentinels fail any unexpected host/network command. The launcher binds executable,
+image, source/stub hashes and unique container name/ID, verifies its owner label
+and removes only that owned ID on normal exit/failure/timeout. An uncertain cleanup
+is a failure, never a success receipt. No test/native acceptance is asserted by
+these instructions before an actual reviewed run.
 
 The tests source only bootstrap function definitions, replace every host-preparation
 helper, replace curl with a local fixture reader, and replace the stage-two executor
 with a marker recorder. **They never execute the stage-two script or its native
 helpers.** Synthetic missing-payload bytes are intentionally not valid service or
 archive contents. Tests prove rejection before host preparation/execution for
-tampered or truncated assets, peer manifests, unknown installer graphs, mutable
+tampered or truncated assets, peer manifests, unknown installer graphs, OS/tool rejection in both modes before downloads/preparation, mutable
 GitHub refs, unsafe overrides, missing assets, and download failures. They also
 verify the audited-file success path reaches only the stub runner, carries the
 source binding, and cleans up after runner failure.
@@ -112,3 +157,18 @@ was exercised. Package repositories, external vendor downloads, the initial
 bootstrap distribution channel, and the operational correctness of the missing
 payloads remain outside this bounded barrier. APP-17 is only partially addressed
 until an authenticated complete release/distribution contract exists and is tested.
+
+
+## Source maintenance and standards adoption
+
+Maintained by Matthew X Murphy, https://MatthewxMurphy.com;
+https://builtnotbegged.com. Existing ownership, SSH/operator policy, release
+identities and licensing/distribution remain unchanged. No new license grant,
+release, deployment or complete #28 acceptance is introduced. The shared
+[engineering SOP](https://github.com/matthewxmurphy/developer-standards) applies.
+Adoption remains partial: scoped source/tests/runbook are present, while complete
+metadata/licenses/notices, portable checker distribution/integration, remote
+CI/protection and native release/rollback qualification remain separate. Do not
+vendor the internally restricted checker into public source without an
+applicable redistribution grant. A fixture receipt is not OS/install acceptance
+or proof that real backup/rollback works.

@@ -115,6 +115,55 @@ require_root() {
   fi
 }
 
+# Read only the OS identity as data. Never source shell code from OS metadata.
+# Fixed /etc path is deliberate: callers cannot nominate a different host identity.
+parse_os_release_id() {
+  local line="" value="" found="0"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ID=*)
+        [ "$found" = "0" ] || return 1
+        found="1"
+        value="${line#ID=}"
+        case "$value" in
+          \"*\") value="${value:1:${#value}-2}" ;;
+          \'*\') value="${value:1:${#value}-2}" ;;
+        esac
+        [[ "$value" =~ ^[a-z0-9._-]+$ ]] || return 1
+        ;;
+    esac
+  done
+  [ "$found" = "1" ] || return 1
+  printf '%s\n' "$value"
+}
+
+bootstrap_os_id() {
+  [ -r /etc/os-release ] || return 1
+  parse_os_release_id </etc/os-release
+}
+
+bootstrap_command_available() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+bootstrap_preflight() {
+  [ "${BASH_VERSINFO[0]}" -ge 4 ] || fail "Bootstrap requires Bash 4 or later."
+  local os_id="" tool=""
+  os_id="$(bootstrap_os_id)" || fail "Readable, unambiguous /etc/os-release ID is required."
+  [ "$os_id" = "ubuntu" ] || fail "Ubuntu is required before bootstrap host preparation."
+
+  # Existing bootstrap helpers need these commands even when Tailscale is present.
+  # Do not perform partial account/SSH changes and then discover a missing tool.
+  local tools=(id apt-get systemctl useradd usermod install touch chown chmod
+               mktemp curl sed grep head diff mv date rm cat)
+  if [ "$RUN_STAGE_TWO" = "1" ]; then
+    tools+=(sha256sum mkdir dirname bash)
+  fi
+  for tool in "${tools[@]}"; do
+    bootstrap_command_available "$tool" || fail "Required bootstrap command unavailable: $tool"
+  done
+}
+
 stage_two_has_ssh_pub_arg() {
   local arg=""
 
@@ -405,6 +454,7 @@ harden_ssh() {
 main() {
   trap cleanup EXIT
   parse_args "$@"
+  bootstrap_preflight
   validate_stage_two_integrity
   require_root
   if [ "${RUN_STAGE_TWO}" = "1" ]; then
