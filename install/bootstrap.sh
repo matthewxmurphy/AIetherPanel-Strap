@@ -4,10 +4,19 @@ set -euo pipefail
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
 
-BOOTSTRAP_SOURCE_ROOT="${AIETHERPANEL_BOOTSTRAP_SOURCE_ROOT:-https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main}"
-STAGE_TWO_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-${AIETHERPANEL_STAGE_TWO_SOURCE_ROOT:-https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/main}}"
-TMP_DIR="$(mktemp -d /tmp/aetherpanel-bootstrap.XXXXXX)"
-INSTALLER_PATH="${TMP_DIR}/aetherpanel-install.sh"
+# This audited source identity is not a release claim. Do not replace its
+# content hashes with values downloaded from an untrusted source or manifest.
+AUDITED_STAGE_TWO_SOURCE_ROOT="https://raw.githubusercontent.com/matthewxmurphy/AIetherPanel-Strap/25a19882d204dfba392090f84d563d8df9d4038c"
+AUDITED_STAGE_TWO_SHA256="1f0c5d6c75e782c8ffbe62c4e92c5063ab381bb1bb4e63fe4c40471c3b330b00"
+BOOTSTRAP_SOURCE_ROOT="${AIETHERPANEL_BOOTSTRAP_SOURCE_ROOT:-${AUDITED_STAGE_TWO_SOURCE_ROOT}}"
+STAGE_TWO_SOURCE_ROOT="${AETHERPANEL_INSTALL_SOURCE_ROOT:-${AIETHERPANEL_STAGE_TWO_SOURCE_ROOT:-${AUDITED_STAGE_TWO_SOURCE_ROOT}}}"
+STAGE_TWO_SHA256="${AIETHERPANEL_STAGE_TWO_SHA256:-${AUDITED_STAGE_TWO_SHA256}}"
+STAGE_TWO_SHA256_EXPLICIT="${AIETHERPANEL_STAGE_TWO_SHA256:+1}"
+STAGE_TWO_SERVICE_SHA256="${AIETHERPANEL_STAGE_TWO_SERVICE_SHA256:-}"
+STAGE_TWO_CONTROLLER_SHA256="${AIETHERPANEL_STAGE_TWO_CONTROLLER_SHA256:-}"
+STAGE_TWO_CONTROLLER_TAG="${AETHERPANEL_CONTROLLER_BUNDLE_TAG:-controller-ready-stable-livewire}"
+TMP_DIR=""
+INSTALLER_PATH=""
 RUN_STAGE_TWO="0"
 PASSTHROUGH_ARGS=()
 FLEET_SSH_PUB_URL="${AIETHERPANEL_FLEET_SSH_PUB_URL:-}"
@@ -28,10 +37,29 @@ fail() {
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --stage-two-source-root)
+      --stage-two-source-root|--install-source-root)
         [ $# -ge 2 ] || fail "--stage-two-source-root requires a value."
         STAGE_TWO_SOURCE_ROOT="${2:-}"
         shift 2
+        ;;
+      --stage-two-sha256)
+        [ $# -ge 2 ] || fail "--stage-two-sha256 requires a value."
+        STAGE_TWO_SHA256="${2:-}"
+        STAGE_TWO_SHA256_EXPLICIT="1"
+        shift 2
+        ;;
+      --stage-two-service-sha256)
+        [ $# -ge 2 ] || fail "--stage-two-service-sha256 requires a value."
+        STAGE_TWO_SERVICE_SHA256="${2:-}"
+        shift 2
+        ;;
+      --stage-two-controller-sha256)
+        [ $# -ge 2 ] || fail "--stage-two-controller-sha256 requires a value."
+        STAGE_TWO_CONTROLLER_SHA256="${2:-}"
+        shift 2
+        ;;
+      --stage-two-source-root=*|--install-source-root=*)
+        fail "Use --stage-two-source-root URL so its integrity inputs are checked together."
         ;;
       --run-stage-two)
         RUN_STAGE_TWO="1"
@@ -60,8 +88,11 @@ Usage:
   bootstrap.sh [bootstrap-options] [installer-options]
 
 Bootstrap options:
-  --stage-two-source-root URL   Source root used to download stage-two installer assets
-  --run-stage-two               Run the stage-two installer after bootstrap prep
+  --stage-two-source-root URL   HTTPS mirror of the audited stage-two source
+  --stage-two-sha256 HASH       Trusted audited installer digest (required for a custom mirror)
+  --stage-two-service-sha256 HASH     Trusted missing service-template digest
+  --stage-two-controller-sha256 HASH  Trusted missing controller-bundle digest
+  --run-stage-two               Verify every required asset before stage-two execution
   --tailscale-authkey KEY       Optional Tailscale auth key for non-interactive bring-up
   --tailscale-args ARGS         Extra arguments passed to tailscale up
   --fleet-ssh-pub-url URL       Public key list for controller/operator SSH access on joined nodes
@@ -82,6 +113,55 @@ require_root() {
   if [ "$(id -u)" -ne 0 ]; then
     fail "Run this bootstrap as root."
   fi
+}
+
+# Read only the OS identity as data. Never source shell code from OS metadata.
+# Fixed /etc path is deliberate: callers cannot nominate a different host identity.
+parse_os_release_id() {
+  local line="" value="" found="0"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ID=*)
+        [ "$found" = "0" ] || return 1
+        found="1"
+        value="${line#ID=}"
+        case "$value" in
+          \"*\") value="${value:1:${#value}-2}" ;;
+          \'*\') value="${value:1:${#value}-2}" ;;
+        esac
+        [[ "$value" =~ ^[a-z0-9._-]+$ ]] || return 1
+        ;;
+    esac
+  done
+  [ "$found" = "1" ] || return 1
+  printf '%s\n' "$value"
+}
+
+bootstrap_os_id() {
+  [ -r /etc/os-release ] || return 1
+  parse_os_release_id </etc/os-release
+}
+
+bootstrap_command_available() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+bootstrap_preflight() {
+  [ "${BASH_VERSINFO[0]}" -ge 4 ] || fail "Bootstrap requires Bash 4 or later."
+  local os_id="" tool=""
+  os_id="$(bootstrap_os_id)" || fail "Readable, unambiguous /etc/os-release ID is required."
+  [ "$os_id" = "ubuntu" ] || fail "Ubuntu is required before bootstrap host preparation."
+
+  # Existing bootstrap helpers need these commands even when Tailscale is present.
+  # Do not perform partial account/SSH changes and then discover a missing tool.
+  local tools=(id apt-get systemctl useradd usermod install touch chown chmod
+               mktemp curl sed grep head diff mv date rm cat)
+  if [ "$RUN_STAGE_TWO" = "1" ]; then
+    tools+=(sha256sum mkdir dirname bash)
+  fi
+  for tool in "${tools[@]}"; do
+    bootstrap_command_available "$tool" || fail "Required bootstrap command unavailable: $tool"
+  done
 }
 
 stage_two_has_ssh_pub_arg() {
@@ -108,7 +188,80 @@ effective_fleet_ssh_pub_url() {
 }
 
 cleanup() {
-  rm -rf "${TMP_DIR}"
+  if [ -n "${TMP_DIR}" ]; then
+    rm -rf "${TMP_DIR}"
+  fi
+  if [ -n "${SSH_SOURCE_CACHE}" ]; then
+    rm -f "${SSH_SOURCE_CACHE}"
+  fi
+}
+
+validate_stage_two_integrity() {
+  [ "${RUN_STAGE_TWO}" = "1" ] || return 0
+  STAGE_TWO_SOURCE_ROOT="${STAGE_TWO_SOURCE_ROOT%/}"
+  local source_pattern='^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$'
+  [[ "${STAGE_TWO_SOURCE_ROOT}" =~ ${source_pattern} ]] || fail "Stage-two source must be an HTTPS base URL without credentials, query, fragment or shell characters."
+
+  [[ "${STAGE_TWO_SOURCE_ROOT}/" != *"/../"* && "${STAGE_TWO_SOURCE_ROOT}/" != *"/./"* ]] || fail "Stage-two source must not contain relative path components."
+
+  if [[ "${STAGE_TWO_SOURCE_ROOT}" == https://raw.githubusercontent.com/* ]]; then
+    local immutable_pattern='^https://raw[.]githubusercontent[.]com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/[0-9a-f]{40}(/[A-Za-z0-9._~-]+)*$'
+    [[ "${STAGE_TWO_SOURCE_ROOT}" =~ ${immutable_pattern} ]] || fail "GitHub stage-two source must use a full immutable commit, not a branch or tag."
+  fi
+  if [ "${STAGE_TWO_SOURCE_ROOT}" != "${AUDITED_STAGE_TWO_SOURCE_ROOT}" ] && [ "${STAGE_TWO_SHA256_EXPLICIT}" != "1" ]; then
+    fail "Custom stage-two sources require an explicit trusted --stage-two-sha256."
+  fi
+
+  local variable=""
+  for variable in STAGE_TWO_SHA256 STAGE_TWO_SERVICE_SHA256 STAGE_TWO_CONTROLLER_SHA256; do
+    [[ "${!variable}" =~ ^[A-Fa-f0-9]{64}$ ]] || fail "${variable} requires a trusted SHA256. The audited source lacks the service template and controller bundle; obtain their complete reviewed payload and digests before stage two."
+    printf -v "${variable}" '%s' "${!variable,,}"
+  done
+  [ "${STAGE_TWO_SHA256}" = "${AUDITED_STAGE_TWO_SHA256}" ] || fail "This bootstrap supports only the audited stage-two script and dependency graph. Review a changed installer before changing its trust contract."
+  [[ "${STAGE_TWO_CONTROLLER_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Controller bundle tag must be one safe path component."
+}
+
+stage_two_asset() {
+  local relative="$1"
+  local expected="$2"
+  local destination="${TMP_DIR}/source/${relative}"
+  local partial="${destination}.part"
+  local actual=""
+
+  mkdir -p "$(dirname "${destination}")"
+  if ! curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 120 "${STAGE_TWO_SOURCE_ROOT}/${relative}" --output "${partial}"; then
+    fail "Stage-two asset download failed: ${relative}. No stage-two code was executed."
+  fi
+  actual="$(sha256sum "${partial}")" || fail "Could not verify stage-two asset: ${relative}."
+  [ "${actual%% *}" = "${expected}" ] || fail "Stage-two asset SHA256 mismatch: ${relative}. No stage-two code was executed."
+  mv "${partial}" "${destination}"
+}
+
+prepare_verified_stage_two() {
+  TMP_DIR="$(mktemp -d /tmp/aetherpanel-bootstrap.XXXXXX)"
+  INSTALLER_PATH="${TMP_DIR}/source/install/aetherpanel-install.sh"
+  stage_two_asset "install/aetherpanel-install.sh" "${STAGE_TWO_SHA256}"
+
+  # The audited installer discovers a local source tree using ui/ and conf/.
+  # Stage verified real source files there so it cannot fetch mutable helpers later.
+  local digest=""
+  local relative=""
+  while read -r digest relative; do
+    stage_two_asset "${relative}" "${digest}"
+  done <<'ASSETS'
+e00c835c3c2387d25afe4cf9c2c3e593546a13e388abca1c427de602cc236604 install/steps/10-preflight.sh
+1f07035aa49ba5d41806454798accaa75b4c83a856efda91b2212043aa5bc85a install/steps/20-packages.sh
+20b4fdacd0dedae7c98585bd8d2b7ec9095578e64e65136afc60233893befc35 install/steps/30-tailscale.sh
+e2a3a065332eb6049ca3db03a9f9e747ee147603ff6ce6f4f7d43a9d2b232309 install/steps/40-panel-files.sh
+52188bd1eefad87e6453ee6f09c82eceaa778b156632e92a2133ab904be97f6c install/steps/50-services.sh
+4c3fd322b7c16078b800399063acda277a5370326ebe0e6935732bf5ea0fc312 conf/lighttpd-controller.conf.template
+8fcbb3085b8f3c7e76a7e85694e7b1d2e583e017a52830021245f44d61471ad3 ui/public/index.php
+ASSETS
+  stage_two_asset "conf/aetherpanel-lighttpd.service.template" "${STAGE_TWO_SERVICE_SHA256}"
+  stage_two_asset "controller/dist/controller-runtime/${STAGE_TWO_CONTROLLER_TAG}.tar.gz" "${STAGE_TWO_CONTROLLER_SHA256}"
+  export AETHERPANEL_INSTALL_SOURCE_ROOT="${STAGE_TWO_SOURCE_ROOT}"
+  export AETHERPANEL_CONTROLLER_BUNDLE_TAG="${STAGE_TWO_CONTROLLER_TAG}"
 }
 
 default_fleet_authorized_keys() {
@@ -299,8 +452,15 @@ harden_ssh() {
 }
 
 main() {
+  trap cleanup EXIT
   parse_args "$@"
+  bootstrap_preflight
+  validate_stage_two_integrity
   require_root
+  if [ "${RUN_STAGE_TWO}" = "1" ]; then
+    log "Verifying stage-two installer and required payload"
+    prepare_verified_stage_two
+  fi
   install_tailscale
   ensure_operator_user
   resolve_ssh_pub_source
@@ -309,25 +469,19 @@ main() {
   ensure_aietherpanel_apt_repo
   harden_ssh
 
-  trap cleanup EXIT
-
-  export AETHERPANEL_INSTALL_SOURCE_ROOT="${STAGE_TWO_SOURCE_ROOT}"
-
   if [ "${RUN_STAGE_TWO}" != "1" ]; then
     log "Bootstrap prep complete. Tailscale, operator access, and the AIetherPanel apt repo are ready."
     exit 0
   fi
-
-  log "Downloading installer"
-  curl -fsSL "${STAGE_TWO_SOURCE_ROOT%/}/install/aietherpanel-install.sh" -o "${INSTALLER_PATH}"
-  chmod +x "${INSTALLER_PATH}"
 
   if ! stage_two_has_ssh_pub_arg; then
     PASSTHROUGH_ARGS+=("--ssh-pub-url" "$(effective_fleet_ssh_pub_url)")
   fi
 
   log "Running installer"
-  exec bash "${INSTALLER_PATH}" "${PASSTHROUGH_ARGS[@]}"
+  bash "${INSTALLER_PATH}" "${PASSTHROUGH_ARGS[@]}"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
